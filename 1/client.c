@@ -14,7 +14,8 @@
 // connection status
 enum connectionStatusEnum {
   NOT_READY, READY, CLOSED, TIMEOUT, USER_EXIT, ERROR
-} status;
+};
+volatile sig_atomic_t status;
 
 int sockfd; // socket connected to server
 char *buf; // user input buffer
@@ -63,6 +64,9 @@ void buildConnection(char *ipStr, char *portStr) {
   if (setsockopt (sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
     fprintf( stderr, "failed to set timeout\n");
   }
+  if (setsockopt (sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+    fprintf( stderr, "failed to set timeout\n");
+  }
 }
 
 void closeConnection(void) {
@@ -88,9 +92,8 @@ int readUserInput(FILE *f) {
       buf = newbuf;
       buf_size = buf_size * 2;
     }
-    buf[i] = '\r';
-    buf[i+1] = '\n';
-    buf[i+2] = '\0';
+    buf[i] = '\n';
+    buf[i+1] = '\0';
     return (i == 0 && ch == EOF) ? 0 : 1;
 }
 
@@ -99,7 +102,11 @@ void sendToServer(void) {
   char *p = buf;
   while (n > 0) {
     int r = write(sockfd, buf, strlen(buf));
-    if (r <= 0) {
+    if (r == 0) {
+      status = CLOSED;
+      return ;
+    }
+    if (r < 0) {
       if (errno == EINTR) {
         r = 0;
       }
@@ -109,6 +116,7 @@ void sendToServer(void) {
           status = TIMEOUT;
         }
         else if (status != CLOSED) {
+          printf("error %d\n", errno);
           status = ERROR;
         }
         return ;
@@ -124,10 +132,14 @@ void writeServerResponse(void) {
   while (flag) {
     int n;
     char ch;
-    n = read(sockfd, &ch, 1);
-    if (n == 1) putchar(ch);
-    else if (n == 0) {
-      flag = 0;
+    n = recv(sockfd, &ch, 1, 0);
+    if (n == 0 || errno == ECONNRESET) {
+      status = CLOSED;
+      return ;
+    }
+    if (n == 1) {
+      putchar(ch);
+      flag = ch != '\n';
     }
     else {
       if (errno == EINTR) {
@@ -135,10 +147,12 @@ void writeServerResponse(void) {
       }
       else {
         // real error
-        if (errno == EWOULDBLOCK) {
+        if (errno == EWOULDBLOCK || errno != EAGAIN) {
+          putchar('\n');
           status = TIMEOUT;
         }
         else if (status != CLOSED) {
+          printf("error %d\n", errno);
           status = ERROR;
         }
         return ;
@@ -162,18 +176,25 @@ int main(int argc, char *argv[])
   while (status == READY) {
     fd_set readfds;
     FD_ZERO(&readfds);
-    FD_SET(STDIN_FD, &readfds); // stdin
+    FD_SET(STDIN_FILENO, &readfds); // stdin
     FD_SET(sockfd, &readfds);
     struct timeval timeout;
-    timeout.tv_sec = 2;
+    timeout.tv_sec = 10;
     timeout.tv_usec = 0;
     int maxfd = maxint(sockfd + 1, STDIN_FD);
     select(maxfd, &readfds, NULL, NULL, &timeout);
     if (FD_ISSET(STDIN_FD, &readfds)) {
       int has = readUserInput(stdin);
-      if (has == 1) sendToServer();
+      if (has == 1) {
+        if (strcmp(buf, "exit\n")) {
+          sendToServer();
+        }
+        else {
+          status = USER_EXIT;
+        }
+      }
     }
-    if (FD_ISSET(sockfd, &readfds)) {
+    else if (FD_ISSET(sockfd, &readfds)) {
       writeServerResponse();
     }
   }
@@ -182,17 +203,17 @@ int main(int argc, char *argv[])
       fputs("Server closed\n", stdout);
       break;
     case TIMEOUT:
-      fputs("Server timeout\n", stderr);
+      fputs("Server timeout\n", stdout);
       exit(3);
     case USER_EXIT:
       break;
     case ERROR:
-      fputs("Socket error\n", stderr);
+      fputs("Socket error\n", stdout);
       exit(3);
     case NOT_READY:
     case READY:
     default:
-      fputs("This shouldn't happen!\n", stderr);
+      fputs("This shouldn't happen!\n", stdout);
       exit(-1);
       break;
   }
