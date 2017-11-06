@@ -231,6 +231,37 @@ void processMessage(int clientId, char *msg) {
   }
 }
 
+void hello(int clientId) {
+  sendToClient(clientId, SERVER_HEAD "Hello, ");
+  sendNameToClient(clientId, Clients[clientId].name);
+  sendToClient(clientId, "! From: ");
+  // show IP
+  char ipstr[100];
+  inet_ntop(AF_INET, &Clients[clientId].addr.in.sin_addr, ipstr, sizeof (ipstr));
+  sendToClient(clientId, ipstr);
+  // show port
+  int port = ntohs(Clients[clientId].addr.in.sin_port);
+  snprintf(ipstr, 100, "/%d\n", port);
+  sendToClient(clientId, ipstr);
+  int i;
+  for (i = 2; i <= maxi; i++) {
+    if (ClientFd[i].fd < 0) continue; // not used
+    if (i == clientId) continue;
+    sendToClient(i, SERVER_HEAD "Someone is coming!\n");
+  }
+}
+
+void goodbye(int clientId) {
+  int i;
+  for (i = 2; i <= maxi; i++) {
+    if (ClientFd[i].fd < 0) continue; // not used
+    if (i == clientId) continue; // don't send message to him
+    sendToClient(i, SERVER_HEAD);
+    sendNameToClient(i, Clients[clientId].name);
+    sendToClient(i, " is offline.\n");
+  }
+}
+
 void processClient(int clientId, int socketId) {
   // socketId is socket of client #clientId
   int still = 1;
@@ -241,6 +272,7 @@ void processClient(int clientId, int socketId) {
       if (errno == ECONNRESET) {
         printf("client %d aborted connection\n", clientId);
         close(socketId);
+        goodbye(clientId);
         destroyClient(clientId);
       }
       else if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -253,6 +285,7 @@ void processClient(int clientId, int socketId) {
     else if (n == 0) {
       printf("client %d closed connection\n", clientId);
       close(socketId);
+      goodbye(clientId);
       destroyClient(clientId);
     }
     else { // check if the line is finished
@@ -329,6 +362,7 @@ int main(int argc, char *argv[])
           printf("Its client id is %d\n", i);
           ClientFd[i].events = POLLRDNORM;
           initClient(i, clientInfo);
+          hello(i);
           if (i > maxi)
             maxi = i;
           if (--nready <= 0)
