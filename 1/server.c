@@ -14,7 +14,8 @@
 #include <unistd.h> // STDIN_FILENO
 #include "mybuff.h"
 #define SERVER_HEAD "\x1B[33m[Server]\x1B[0m "
-#define ERROR_HEAD  SERVER_HEAD "\x1B[91mERROR\x1B[0m: "
+#define ERROR_HEAD  SERVER_HEAD "\x1B[91;1mERROR\x1B[0m: "
+#define SUCCESS_HEAD  SERVER_HEAD "\x1B[92;1mSUCCESS\x1B[0m: "
 
 // define backlog
 #define LISTENQ 5
@@ -124,14 +125,19 @@ void sendNameToClient(int clientId, const char *name) {
   sendToClient(clientId, "\x1B[0m");
 }
 
+void sendMessageToClient(int clientId, const char *name) {
+  sendToClient(clientId, "\x1B[93m");
+  sendToClient(clientId, name);
+  sendToClient(clientId, "\x1B[0m");
+}
+
 void errorCommand(int clientId) {
   sendToClient(clientId, ERROR_HEAD "Error command.\n");
 }
  
 void whoCommand(int clientId, char *rem) {
   char *no = getArgFromString(rem, &rem);
-  if (no != NULL) errorCommand(clientId);
-  else {
+  {
     int i;
     for (i = 2; i <= maxi; i++) {
       if (ClientFd[i].fd < 0) continue; // not used
@@ -163,8 +169,7 @@ void nameCommand(int clientId, char *rem) {
     return ;
   }
   no = getArgFromString(rem, &rem);
-  if (no != NULL) errorCommand(clientId);
-  else {
+  {
     // check name type
     int len = strlen(arg1), i;
     for (i = 0; arg1[i]; i++) {
@@ -211,6 +216,66 @@ void nameCommand(int clientId, char *rem) {
   }
 }
 
+void tellCommand(int clientId, char *rem) {
+  char Anonymous[] = ERROR_HEAD "You are anonymous.\n";
+  char AnonymousRcvr[] = ERROR_HEAD "The client to which you sent is anonymous.\n";
+  char NotExist[] = ERROR_HEAD "The receiver doesn't exist.\n";
+  char EmptyMsg[] = ERROR_HEAD "Message is empty.\n";
+  char NoRcvr[] = ERROR_HEAD "You didn't specify the receiver.\n";
+  char Success[] = SUCCESS_HEAD "Your message has been sent.\n";
+  if (strcmp(Clients[clientId].name, "anonymous") == 0) {
+    sendToClient(clientId, Anonymous);
+    return ;
+  }
+  char *username = getArgFromString(rem, &rem), *no, *message;
+  if (username == NULL) {
+    sendToClient(clientId, NoRcvr);
+    return ;
+  }
+  message = rem;
+  if (message == NULL || *message == '\0') {
+    sendToClient(clientId, EmptyMsg);
+    return ;
+  }
+  if (strcmp(username, "anonymous") == 0) {
+    sendToClient(clientId, AnonymousRcvr);
+    return ;
+  }
+  int i;
+  for (i = 2; i <= maxi; i++) {
+    if (ClientFd[i].fd < 0) continue;
+    if (strcmp(Clients[i].name, username) == 0) break;
+  }
+  if (i <= maxi) {
+    sendToClient(i, SERVER_HEAD);
+    sendNameToClient(i, Clients[clientId].name);
+    sendToClient(i, " tell you ");
+    sendMessageToClient(i, message);
+    sendToClient(i, "\n");
+    sendToClient(clientId, Success);
+  }
+  else {
+    sendToClient(clientId, NotExist);
+  }
+}
+
+void yellCommand(int clientId, char *message) {
+  char EmptyMsg[] = ERROR_HEAD "Message is empty.\n";
+  if (message == NULL || *message == '\0') {
+    sendToClient(clientId, EmptyMsg);
+    return ;
+  }
+  int i;
+  for (i = 2; i <= maxi; i++) {
+    if (ClientFd[i].fd < 0) continue;
+    sendToClient(i, SERVER_HEAD);
+    sendNameToClient(i, Clients[clientId].name);
+    sendToClient(i, " yell ");
+    sendMessageToClient(i, message);
+    sendToClient(i, "\n");
+  }
+}
+
 void processMessage(int clientId, char *msg) {
   char *rem = NULL;
   char *cmd = getArgFromString(msg, &rem);
@@ -222,10 +287,10 @@ void processMessage(int clientId, char *msg) {
     nameCommand(clientId, rem);
   }
   else if (strcmp(cmd, "tell") == 0) {
-    printf("tell\n");
+    tellCommand(clientId, rem);
   }
   else if (strcmp(cmd, "yell") == 0) {
-    printf("yell\n");
+    yellCommand(clientId, rem);
   }
   else {
     errorCommand(clientId);
@@ -270,7 +335,7 @@ void processClient(int clientId, int socketId) {
     still = 0;
     int n = recvline(socketId, &Clients[clientId].recv);
     if (n < 0) {
-      if (errno == ECONNRESET) {
+      if (errno == ECONNRESET || errno == EPIPE) {
         printf("client %d aborted connection\n", clientId);
         close(socketId);
         goodbye(clientId);
