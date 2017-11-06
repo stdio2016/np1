@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h> // for OPEN_MAX
 #include <stdio.h>
@@ -10,6 +11,9 @@
 #include <arpa/inet.h> // htons()
 #include <unistd.h> // write()
 #include <poll.h> // poll(), struct pollfd
+
+#define SERVER_HEAD "\x1B[33m[Server]\x1B[0m "
+#define ERROR_HEAD  SERVER_HEAD "\x1B[91mERROR\x1B[0m: "
 
 // define backlog
 #define LISTENQ 5
@@ -39,6 +43,8 @@ struct client_info {
   struct char_buffer_t send; // buffer for server -> client
 } *Clients;
 struct pollfd *ClientFd;
+// all connected clients
+int maxi = 1;
 
 void OutOfMemory(void) {
   fprintf(stderr, "Out of memory!\n");
@@ -157,6 +163,112 @@ int recvline(int socketId, struct char_buffer_t *buf) {
   }
 }
 
+char *getArgFromString(char *msg, char **remaining) {
+  if (msg == NULL) {
+    *remaining = NULL;
+    return NULL;
+  }
+  while (*msg == ' ') msg++; // skip space
+  char *d = msg;
+  while (*d != ' ' && *d != '\0') {
+    d++; // skip argument
+  }
+  if (*d == '\0') { // end of string
+    *remaining = NULL;
+  }
+  else { // next space
+    *d = '\0';
+    *remaining = d + 1;
+  }
+  if (*msg == '\0') return NULL;
+  return msg;
+}
+
+void sendToClient(int clientId, const char *msg) {
+  send(ClientFd[clientId].fd, msg, strlen(msg), MSG_DONTWAIT);
+}
+
+void errorCommand(int clientId) {
+  sendToClient(clientId, ERROR_HEAD "Error command.\n");
+}
+
+void nameCommand(int clientId, char *rem) {
+  char Anonymous[] = ERROR_HEAD "Username cannot be anonymous.\n";
+  char ErrorName[] = ERROR_HEAD "Username can only consists of 2~12 English letters.\n";
+  char *arg1 = getArgFromString(rem, &rem), *no;
+  if (arg1 == NULL) {
+    sendToClient(clientId, Anonymous);
+    return ;
+  }
+  no = getArgFromString(rem, &rem);
+  if (no != NULL) errorCommand(clientId);
+  else {
+    // check name type
+    int len = strlen(arg1), i;
+    for (i = 0; arg1[i]; i++) {
+      if (!isalpha(arg1[i])) break;
+    }
+    if (len < 2 || len > 12 || i != len) {
+      sendToClient(clientId, ErrorName);
+      return ;
+    }
+    // check if the name is anonymous
+    if (strcmp(arg1, "anonymous") == 0) {
+      sendToClient(clientId, Anonymous);
+      return ;
+    }
+    // check if the name is unique
+    for (i = 2; i <= maxi; i++) {
+      if (ClientFd[i].fd < 0) continue; // not used
+      if (i == clientId) continue; // a user can be renamed to itself
+      if (strcmp(Clients[i].name, arg1) == 0) {
+        break; // same name
+      }
+    }
+    if (i != maxi + 1) {
+      sendToClient(clientId, ERROR_HEAD "\x1B[92m");
+      sendToClient(clientId, arg1);
+      sendToClient(clientId, "\x1B[0m has been used by others.\n");
+      return ;
+    }
+    char oldname[16];
+    strcpy(oldname, Clients[clientId].name);
+    strcpy(Clients[clientId].name, arg1);
+    sendToClient(clientId, SERVER_HEAD "You're now known as \x1B[92m");
+    sendToClient(clientId, arg1);
+    sendToClient(clientId, "\x1B[0m.\n");
+    for (i = 2; i <= maxi; i++) {
+      if (i == clientId) continue;
+      sendToClient(i, SERVER_HEAD "\x1B[92m");
+      sendToClient(i, oldname);
+      sendToClient(i, "\x1B[0m is now known as \x1B[92m");
+      sendToClient(i, arg1);
+      sendToClient(i, "\x1B[0m.\n");
+    }
+  }
+}
+
+void processMessage(int clientId, char *msg) {
+  char *rem = NULL;
+  char *cmd = getArgFromString(msg, &rem), *no;
+  if (strcmp(cmd, "who") == 0) {
+    no = getArgFromString(rem, &rem);
+    if (no != NULL) errorCommand(clientId);
+    else {
+      
+    }
+  }
+  else if (strcmp(cmd, "name") == 0) {
+    nameCommand(clientId, rem);
+  }
+  else if (strcmp(cmd, "tell") == 0) {
+    printf("tell\n");
+  }
+  else if (strcmp(cmd, "yell") == 0) {
+    printf("yell\n");
+  }
+}
+
 void processClient(int clientId, int socketId) {
   // socketId is socket of client #clientId
   int still = 1;
@@ -183,10 +295,11 @@ void processClient(int clientId, int socketId) {
     }
     else { // check if the line is finished
       if (Clients[clientId].recv.buf[n-1] == '\n') {
-        //TODO: process message
         Clients[clientId].recv.buf[n-1] = '\0';
         printf("client %d says %s\n", clientId, Clients[clientId].recv.buf);
+        processMessage(clientId, Clients[clientId].recv.buf);
         Clients[clientId].recv.buf[n-1] = '\n';
+        still = 1;
       }
     }
   }
@@ -212,7 +325,6 @@ int main(int argc, char *argv[])
   }
   Clients = malloc(sizeof(struct client_info) * open_max);
   if (Clients == NULL) OutOfMemory();
-  int maxi = 1;
   while (88487) {
     int nready = poll(ClientFd, maxi+1, SOME_TIME);
     if (ClientFd[0].revents & POLLIN) { // input from stdin: manually send message to client
