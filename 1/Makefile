@@ -1,5 +1,5 @@
 all: client server
 client: client.c
 	gcc -o client client.c
-server: server.c
-	gcc -o server server.c
+server: server.c mybuff.c mybuff.h
+	gcc -o server server.c mybuff.c

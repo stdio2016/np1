@@ -9,9 +9,9 @@
 #include <sys/types.h> // portable setsockopt()
 #include <netinet/in.h> // struct sockaddr_in, htons()
 #include <arpa/inet.h> // htons()
-#include <unistd.h> // write()
 #include <poll.h> // poll(), struct pollfd
-
+#include <unistd.h> // STDIN_FILENO
+#include "mybuff.h"
 #define SERVER_HEAD "\x1B[33m[Server]\x1B[0m "
 #define ERROR_HEAD  SERVER_HEAD "\x1B[91mERROR\x1B[0m: "
 
@@ -29,27 +29,16 @@ union good_sockaddr {
   struct sockaddr_in in;
 };
 
-struct char_buffer_t {
-  int size;
-  int capacity;
-  int finished;
-  char *buf;
-};
-
 // store client info
 struct client_info {
   char name[16]; // name must be 2~12 English letter
+  union good_sockaddr addr; // store client's IP and port
   struct char_buffer_t recv; // buffer for client message
   struct char_buffer_t send; // buffer for server -> client
 } *Clients;
 struct pollfd *ClientFd;
 // all connected clients
 int maxi = 1;
-
-void OutOfMemory(void) {
-  fprintf(stderr, "Out of memory!\n");
-  exit(2);
-}
 
 void initServer(char *portStr) {
   union good_sockaddr servaddr;
@@ -90,15 +79,9 @@ void initServer(char *portStr) {
   }
 }
 
-void initBuffer(struct char_buffer_t *buf) {
-  buf->size = 0;
-  buf->capacity = 10;
-  buf->buf = malloc(sizeof(char) * buf->capacity);
-  if (buf->buf == NULL) OutOfMemory();
-}
-
-void initClient(int clientId) {
+void initClient(int clientId, union good_sockaddr addr) {
   strcpy(Clients[clientId].name, "anonymous");
+  Clients[clientId].addr = addr;
   initBuffer(&Clients[clientId].recv);
   initBuffer(&Clients[clientId].send);
 }
@@ -107,60 +90,6 @@ void destroyClient(int clientId) {
   ClientFd[clientId].fd = -1;
   free(Clients[clientId].recv.buf);
   free(Clients[clientId].send.buf);
-}
-
-// 0 means connection closed
-// -1 means error
-int recvline(int socketId, struct char_buffer_t *buf) {
-  int i, firstrecv = 1;
-  if (buf->size > 0 && buf->buf[buf->size-1] == '\n') {
-    // already read a line
-    for (i = buf->size; i < buf->finished; i++) {
-      buf->buf[i - buf->size] = buf->buf[i];
-    }
-    buf->finished -= buf->size;
-    // try to find '\n'
-    for (i = 0; i < buf->finished; i++) {
-      if (buf->buf[i] == '\n') break;
-    }
-    if (i < buf->finished) {
-      buf->size = i+1;
-      return i+1;
-    }
-    buf->size = buf->finished;
-  }
-  // receive a '\n'
-  while (1) {
-    int n = recv(socketId, buf->buf + buf->finished, buf->capacity - buf->finished, MSG_DONTWAIT);
-    if (n > 0) {
-      buf->finished += n;
-      for (i = buf->size; i < buf->finished; i++) {
-        if (buf->buf[i] == '\n') break;
-      }
-      if (i < buf->finished) {
-        buf->size = i+1;
-        return i+1; // found a newline
-      }
-      buf->size = buf->finished;
-      if (buf->finished >= buf->capacity) {
-        char *newbuf = realloc(buf->buf, buf->capacity * 2);
-        if (newbuf == NULL) OutOfMemory();
-        buf->buf = newbuf;
-        buf->capacity *= 2;
-      }
-      else {
-        return buf->size; // not finished receiving
-      }
-    }
-    else if (n == 0) {
-      if (firstrecv) return 0; // connection closed
-      return buf->size;
-    }
-    else { // error
-      return -1;
-    }
-    firstrecv = 0;
-  }
 }
 
 char *getArgFromString(char *msg, char **remaining) {
@@ -188,8 +117,40 @@ void sendToClient(int clientId, const char *msg) {
   send(ClientFd[clientId].fd, msg, strlen(msg), MSG_DONTWAIT);
 }
 
+void sendNameToClient(int clientId, const char *name) {
+  sendToClient(clientId, "\x1B[92m");
+  sendToClient(clientId, name);
+  sendToClient(clientId, "\x1B[0m");
+}
+
 void errorCommand(int clientId) {
   sendToClient(clientId, ERROR_HEAD "Error command.\n");
+}
+ 
+void whoCommand(int clientId, char *rem) {
+  char *no = getArgFromString(rem, &rem);
+  if (no != NULL) errorCommand(clientId);
+  else {
+    int i;
+    for (i = 2; i <= maxi; i++) {
+      if (ClientFd[i].fd < 0) continue; // not used
+      sendToClient(clientId, SERVER_HEAD);
+      sendNameToClient(clientId, Clients[i].name);
+      sendToClient(clientId, " ");
+      // show IP
+      char ipstr[100];
+      inet_ntop(AF_INET, &Clients[i].addr.in.sin_addr, ipstr, sizeof (ipstr));
+      sendToClient(clientId, ipstr);
+      // show port
+      int port = ntohs(Clients[i].addr.in.sin_port);
+      snprintf(ipstr, 100, "/%d", port);
+      sendToClient(clientId, ipstr);
+      if (i == clientId) {
+        sendToClient(clientId, " ->me");
+      }
+      sendToClient(clientId, "\n");
+    }
+  }
 }
 
 void nameCommand(int clientId, char *rem) {
@@ -226,37 +187,35 @@ void nameCommand(int clientId, char *rem) {
       }
     }
     if (i != maxi + 1) {
-      sendToClient(clientId, ERROR_HEAD "\x1B[92m");
-      sendToClient(clientId, arg1);
-      sendToClient(clientId, "\x1B[0m has been used by others.\n");
+      sendToClient(clientId, ERROR_HEAD);
+      sendNameToClient(clientId, arg1);
+      sendToClient(clientId, " has been used by others.\n");
       return ;
     }
     char oldname[16];
     strcpy(oldname, Clients[clientId].name);
     strcpy(Clients[clientId].name, arg1);
-    sendToClient(clientId, SERVER_HEAD "You're now known as \x1B[92m");
-    sendToClient(clientId, arg1);
-    sendToClient(clientId, "\x1B[0m.\n");
+    sendToClient(clientId, SERVER_HEAD "You're now known as ");
+    sendNameToClient(clientId, arg1);
+    sendToClient(clientId, ".\n");
     for (i = 2; i <= maxi; i++) {
+      if (ClientFd[i].fd < 0) continue; // not used
       if (i == clientId) continue;
-      sendToClient(i, SERVER_HEAD "\x1B[92m");
-      sendToClient(i, oldname);
-      sendToClient(i, "\x1B[0m is now known as \x1B[92m");
-      sendToClient(i, arg1);
-      sendToClient(i, "\x1B[0m.\n");
+      sendToClient(i, SERVER_HEAD);
+      sendNameToClient(i, oldname);
+      sendToClient(i, " is now known as ");
+      sendNameToClient(i, arg1);
+      sendToClient(i, ".\n");
     }
   }
 }
 
 void processMessage(int clientId, char *msg) {
   char *rem = NULL;
-  char *cmd = getArgFromString(msg, &rem), *no;
+  char *cmd = getArgFromString(msg, &rem);
+  if (cmd == NULL) return;
   if (strcmp(cmd, "who") == 0) {
-    no = getArgFromString(rem, &rem);
-    if (no != NULL) errorCommand(clientId);
-    else {
-      
-    }
+    whoCommand(clientId, rem);
   }
   else if (strcmp(cmd, "name") == 0) {
     nameCommand(clientId, rem);
@@ -266,6 +225,9 @@ void processMessage(int clientId, char *msg) {
   }
   else if (strcmp(cmd, "yell") == 0) {
     printf("yell\n");
+  }
+  else {
+    errorCommand(clientId);
   }
 }
 
@@ -285,7 +247,7 @@ void processClient(int clientId, int socketId) {
         ; // malicious client!
       }
       else {
-        printf("readline error\n");
+        printf("recvline error\n");
       }
     }
     else if (n == 0) {
@@ -294,11 +256,12 @@ void processClient(int clientId, int socketId) {
       destroyClient(clientId);
     }
     else { // check if the line is finished
-      if (Clients[clientId].recv.buf[n-1] == '\n') {
-        Clients[clientId].recv.buf[n-1] = '\0';
-        printf("client %d says %s\n", clientId, Clients[clientId].recv.buf);
-        processMessage(clientId, Clients[clientId].recv.buf);
-        Clients[clientId].recv.buf[n-1] = '\n';
+      char *buf = Clients[clientId].recv.buf + Clients[clientId].recv.start;
+      if (buf[n-1] == '\n') {
+        buf[n-1] = '\0';
+        printf("client %d says %s\n", clientId, buf);
+        processMessage(clientId, buf);
+        buf[n-1] = '\n';
         still = 1;
       }
     }
@@ -365,7 +328,7 @@ int main(int argc, char *argv[])
         else {
           printf("Its client id is %d\n", i);
           ClientFd[i].events = POLLRDNORM;
-          initClient(i);
+          initClient(i, clientInfo);
           if (i > maxi)
             maxi = i;
           if (--nready <= 0)
