@@ -186,11 +186,14 @@ int main(int argc, char *argv[])
     if (FD_ISSET(STDIN_FD, &readfds)) {
       int has = readUserInput(stdin);
       if (has == 1) {
-        if (strcmp(buf, "exit\n")) {
-          sendToServer();
+        char *cmd = buf;
+        while (*cmd == ' ') cmd++;
+        if (cmd[0]=='e' && cmd[1]=='x' && cmd[2]=='i' && cmd[3]=='t'
+          && (cmd[4]==' ' || cmd[4]=='\n')) {
+          status = USER_EXIT;
         }
         else {
-          status = USER_EXIT;
+          sendToServer();
         }
       }
     }
