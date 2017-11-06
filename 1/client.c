@@ -21,6 +21,10 @@ int sockfd; // socket connected to server
 char *buf; // user input buffer
 int buf_size;
 
+char *servbuf;
+int servbuf_size;
+int servbuf_pos;
+
 int maxint(int a, int b) {
   return a>b ? a : b;
 }
@@ -127,18 +131,27 @@ void sendToServer(void) {
   }
 }
 
-void writeServerResponse(void) {
+void getServerResponse(void) {
   int flag = 1;
   while (flag) {
     int n;
     char ch;
-    n = recv(sockfd, &ch, 1, 0);
+    n = recv(sockfd, &ch, 1, MSG_DONTWAIT);
     if (n == 0 || errno == ECONNRESET) {
       status = CLOSED;
       return ;
     }
     if (n == 1) {
-      putchar(ch);
+      if (servbuf_pos + 1 >= servbuf_size) {
+        char *newbuf = realloc(servbuf, servbuf_size * 2);
+        if (newbuf == NULL) {
+          printf("Out of memory\n");
+          exit(2);
+        }
+        servbuf = newbuf;
+        servbuf_size *= 2;
+      }
+      servbuf[servbuf_pos++] = ch;
       flag = ch != '\n';
     }
     else {
@@ -147,9 +160,8 @@ void writeServerResponse(void) {
       }
       else {
         // real error
-        if (errno == EWOULDBLOCK || errno != EAGAIN) {
-          putchar('\n');
-          status = TIMEOUT;
+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+          return ;
         }
         else if (status != CLOSED) {
           printf("error %d\n", errno);
@@ -158,6 +170,15 @@ void writeServerResponse(void) {
         return ;
       }
     }
+  }
+}
+
+void writeServerResponse(void) {
+  getServerResponse();
+  if (servbuf_pos > 0 && servbuf[servbuf_pos - 1] == '\n') {
+    servbuf[servbuf_pos] = '\0';
+    printf("%s", servbuf);
+    servbuf_pos = 0;
   }
 }
 
@@ -172,6 +193,9 @@ int main(int argc, char *argv[])
   buildConnection(argv[1], argv[2]);
   buf_size = 10;
   buf = malloc(buf_size * sizeof(char));
+  servbuf_pos = 0;
+  servbuf_size = 10;
+  servbuf = malloc(servbuf_size * sizeof(char));
   status = READY;
   while (status == READY) {
     fd_set readfds;
