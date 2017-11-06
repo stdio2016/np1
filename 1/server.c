@@ -1,6 +1,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h> // for OPEN_MAX
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -292,8 +293,11 @@ void processClient(int clientId, int socketId) {
       char *buf = Clients[clientId].recv.buf + Clients[clientId].recv.start;
       if (buf[n-1] == '\n') {
         buf[n-1] = '\0';
+        int rn = n >= 2 && buf[n-2] == '\r';
+        if (rn) buf[n-2] = '\0';
         printf("client %d says %s\n", clientId, buf);
         processMessage(clientId, buf);
+        if (rn) buf[n-2] = '\r';
         buf[n-1] = '\n';
         still = 1;
       }
@@ -321,6 +325,7 @@ int main(int argc, char *argv[])
   }
   Clients = malloc(sizeof(struct client_info) * open_max);
   if (Clients == NULL) OutOfMemory();
+  signal(SIGPIPE, SIG_IGN);
   while (88487) {
     int nready = poll(ClientFd, maxi+1, SOME_TIME);
     if (ClientFd[0].revents & POLLIN) { // input from stdin: manually send message to client
@@ -356,6 +361,8 @@ int main(int argc, char *argv[])
         }
         if (i == open_max) {
           printf("too many clients\n");
+          char msg[] = SERVER_HEAD "Too many clients connected.\n";
+          send(f, msg, strlen(msg), MSG_DONTWAIT);
           close(f);
         }
         else {

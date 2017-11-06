@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h> // send(), recv()
@@ -23,7 +24,7 @@ void initBuffer(struct char_buffer_t *buf) {
 // -1 means error
 // received line is buf->buf[buf->start ~ buf->end-1]
 int recvline(int socketId, struct char_buffer_t *buf) {
-  int i, firstrecv = 1;
+  int i;
   if (buf->end > 0 && buf->buf[buf->end-1] == '\n') {
     // already read a line
     buf->start = buf->end;
@@ -67,13 +68,13 @@ int recvline(int socketId, struct char_buffer_t *buf) {
       }
     }
     else if (n == 0) {
-      if (firstrecv) return 0; // connection closed
-      return buf->finished;
+      return 0; // connection closed
     }
-    else { // error
-      return -1;
+    else {
+      if (errno != EINTR){ // error
+        return -1;
+      }
     }
-    firstrecv = 0;
   }
 }
 
