@@ -37,6 +37,7 @@ struct client_info {
   union good_sockaddr addr; // store client's IP and port
   struct char_buffer_t recv; // buffer for client message
   struct char_buffer_t send; // buffer for server -> client
+  int closed;
 } *Clients;
 struct pollfd *ClientFd;
 // all connected clients
@@ -84,6 +85,7 @@ void initServer(char *portStr) {
 void initClient(int clientId, union good_sockaddr addr) {
   strcpy(Clients[clientId].name, "anonymous");
   Clients[clientId].addr = addr;
+  Clients[clientId].closed = 0;
   initBuffer(&Clients[clientId].recv);
   initBuffer(&Clients[clientId].send);
 }
@@ -116,7 +118,82 @@ char *getArgFromString(char *msg, char **remaining) {
 }
 
 void sendToClient(int clientId, const char *msg) {
-  send(ClientFd[clientId].fd, msg, strlen(msg), MSG_DONTWAIT);
+  struct char_buffer_t *b = &Clients[clientId].send;
+  if (b->finished < b->end) { // data in buffer, ready to send, but not sent
+    return ;
+  }
+  int all = strlen(msg);
+  int n = 0;
+  if (b->end == 0) {
+    // no data in bufer => try to send to client
+    do {
+      n = send(ClientFd[clientId].fd, msg, all, MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR) ;
+    if (n == all) return; // hooray!
+    if (n == 0) { // connection closed
+      Clients[clientId].closed = 1;
+      return ;
+    }
+    if (n < 0) {
+      n = 0;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        ;
+      }
+      else { // error or connection closed
+        Clients[clientId].closed = 1;
+        return ;
+      }
+    }
+  }
+  // not all are sent
+  int i;
+  for (i = n; i < all; i++) {
+    if (b->end >= b->capacity) {
+      char *newbuf = (char *)realloc(b->buf, b->capacity * 2);
+      if (newbuf == NULL) OutOfMemory() ;
+      b->buf = newbuf;
+      b->capacity = b->capacity * 2;
+    }
+    b->buf[b->end++] = msg[i];
+    if (msg[i] == '\n') break;
+  }
+  if (i < all) { // ready to send
+    b->finished = 0;
+    ClientFd[clientId].events |= POLLWRNORM;
+  }
+  else { // not ready to send
+    b->finished = b->end;
+  }
+}
+
+void trySendToClientAgain(int clientId) {
+  int all = Clients[clientId].send.end;
+  int finished = Clients[clientId].send.finished;
+  char *msg = &Clients[clientId].send.buf[finished];
+  int n;
+  do {
+    n = send(ClientFd[clientId].fd, msg, all - finished, MSG_DONTWAIT);
+  } while (n < 0 && errno == EINTR) ;
+  if (n == 0) { // connection closed, I give up
+    Clients[clientId].closed = 1;
+    ClientFd[clientId].events &= ~POLLWRNORM;
+    return ;
+  }
+  else if (n < 0) {
+    if (errno != EAGAIN && errno != EWOULDBLOCK) { // some error that I don't know
+      Clients[clientId].closed = 1;
+      ClientFd[clientId].events &= ~POLLWRNORM;
+      return ;
+    }
+  }
+  else {
+    Clients[clientId].send.finished += n;
+    if (Clients[clientId].send.finished == all) { // completed
+      Clients[clientId].send.finished = 0;
+      Clients[clientId].send.end = 0;
+      ClientFd[clientId].events &= ~POLLWRNORM;
+    }
+  }
 }
 
 void sendNameToClient(int clientId, const char *name) {
@@ -331,28 +408,23 @@ void goodbye(int clientId) {
 void processClient(int clientId, int socketId) {
   // socketId is socket of client #clientId
   int still = 1;
-  while (still) {
+  while (!Clients[clientId].closed && still) {
     still = 0;
     int n = recvline(socketId, &Clients[clientId].recv);
     if (n < 0) {
       if (errno == ECONNRESET || errno == EPIPE) {
-        printf("client %d aborted connection\n", clientId);
-        close(socketId);
-        goodbye(clientId);
-        destroyClient(clientId);
+        Clients[clientId].closed = 1;
       }
       else if (errno == EAGAIN || errno == EWOULDBLOCK) {
         ; // malicious client!
       }
       else {
         printf("recvline error\n");
+        Clients[clientId].closed = 1;
       }
     }
     else if (n == 0) {
-      printf("client %d closed connection\n", clientId);
-      close(socketId);
-      goodbye(clientId);
-      destroyClient(clientId);
+      Clients[clientId].closed = 1;
     }
     else { // check if the line is finished
       char *buf = Clients[clientId].recv.buf + Clients[clientId].recv.start;
@@ -367,6 +439,15 @@ void processClient(int clientId, int socketId) {
         still = 1;
       }
     }
+  }
+  if (!Clients[clientId].closed && (ClientFd[clientId].revents & POLLWRNORM)) {
+    trySendToClientAgain(clientId);
+  }
+  if (Clients[clientId].closed) {
+    printf("client %d closed connection\n", clientId);
+    close(socketId);
+    goodbye(clientId);
+    destroyClient(clientId);
   }
 }
 
@@ -402,7 +483,7 @@ int main(int argc, char *argv[])
         buf[i] ^= 0x20;
       }
       if (f <= maxi && f > 1 && ClientFd[f].fd > 0) {
-        send(ClientFd[f].fd, buf, strlen(buf), MSG_DONTWAIT);
+        sendToClient(f, buf);
       }
     }
     if (ClientFd[1].revents & POLLRDNORM) { // new client connection
@@ -426,7 +507,7 @@ int main(int argc, char *argv[])
         }
         if (i == open_max) {
           printf("too many clients\n");
-          char msg[] = SERVER_HEAD "Too many clients connected.\n";
+          char msg[] = ERROR_HEAD "Too many clients connected.\n";
           send(f, msg, strlen(msg), MSG_DONTWAIT);
           close(f);
         }
@@ -445,7 +526,7 @@ int main(int argc, char *argv[])
     for (i = 2; i <= maxi; i++) {
       int f = ClientFd[i].fd;
       if (f < 0) continue; // unused socket slot
-      if (ClientFd[i].revents & (POLLRDNORM | POLLERR)) {
+      if (ClientFd[i].revents & (POLLRDNORM | POLLERR | POLLWRNORM)) {
         processClient(i, f);
         if (--nready <= 0)
           break;
