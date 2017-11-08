@@ -202,9 +202,16 @@ void sendNameToClient(int clientId, const char *name) {
   sendToClient(clientId, "\x1B[0m");
 }
 
-void sendMessageToClient(int clientId, const char *name) {
+void sendMessageToClient(int clientId, char *msg) {
   sendToClient(clientId, "\x1B[93m");
-  sendToClient(clientId, name);
+  // replace all control chars with space
+  int i;
+  for (i = 0; msg[i]; i++) {
+    if (msg[i] < ' ' && msg[i] != '\t' || msg[i] == '\x7F') {
+      msg[i] = ' ';
+    }
+  }
+  sendToClient(clientId, msg);
   sendToClient(clientId, "\x1B[0m");
 }
 
@@ -368,6 +375,11 @@ void processMessage(int clientId, char *msg) {
   }
   else if (strcmp(cmd, "yell") == 0) {
     yellCommand(clientId, rem);
+  }
+  else if (strcmp(cmd, "exit") == 0) {
+    // this command should be handled by my client program
+    // however, TA said they might use telnet to connect to my server
+    Clients[clientId].closed = 1;
   }
   else {
     errorCommand(clientId);
