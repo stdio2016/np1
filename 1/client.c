@@ -8,6 +8,7 @@
 #include <netinet/in.h> // struct sockaddr_in, htons()
 #include <arpa/inet.h> // inet_pton()
 #include <unistd.h> // write()
+#include <netdb.h> // getaddrinfo(), gai_strerror
 #define MAXLINE 100
 #define STDIN_FD 0
 
@@ -53,10 +54,29 @@ void buildConnection(char *ipStr, char *portStr) {
   }
   servaddr.in.sin_port = htons(port);
   if (inet_pton(AF_INET, ipStr, &servaddr.in.sin_addr.s_addr) == 0) {
-    fprintf( stderr, "cannot read ip address\n" );
-    exit(1);
+    struct addrinfo hints, *servinfo, *p;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int rv = getaddrinfo(ipStr, portStr, &hints, &servinfo);
+    if (rv != 0) {
+      fprintf( stderr, "%s\n", gai_strerror(rv));
+      exit(1);
+    }
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+      union good_sockaddr ipaddr;
+      ipaddr.sa = *p->ai_addr;
+      servaddr.in.sin_addr.s_addr = ipaddr.in.sin_addr.s_addr;
+      int ret = connect(sockfd, &servaddr.sa, sizeof(servaddr));
+      if (ret == 0) break;
+    }
+    if (p == NULL) {
+      fprintf( stderr, "unable to connect to server\n" );
+      exit(1);
+    }
   }
-  if (connect(sockfd, &servaddr.sa, sizeof(servaddr)) < 0) {
+  else if (connect(sockfd, &servaddr.sa, sizeof(servaddr)) < 0) {
     fprintf( stderr, "unable to connect to server\n" );
     exit(1);
   }
