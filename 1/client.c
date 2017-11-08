@@ -75,6 +75,7 @@ void buildConnection(char *ipStr, char *portStr) {
       fprintf( stderr, "unable to connect to server\n" );
       exit(1);
     }
+    freeaddrinfo(servinfo);
   }
   else if (connect(sockfd, &servaddr.sa, sizeof(servaddr)) < 0) {
     fprintf( stderr, "unable to connect to server\n" );
