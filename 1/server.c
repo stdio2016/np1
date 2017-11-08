@@ -501,6 +501,13 @@ int main(int argc, char *argv[])
   signal(SIGPIPE, SIG_IGN);
   while (88487) {
     int nready = poll(ClientFd, maxi+1, SOME_TIME);
+    if (nready < 0) {
+      if (errno == EINTR) continue;
+      else {
+        printf("poll error\n");
+        exit(3);
+      }
+    }
     if (ClientFd[0].revents & POLLIN) { // input from stdin: manually send message to client
       char buf[100];
       int f = 0;
