@@ -13,9 +13,16 @@
 #include <poll.h> // poll(), struct pollfd
 #include <unistd.h> // STDIN_FILENO
 #include "mybuff.h"
+
+#ifdef BETTER_PRINT
 #define SERVER_HEAD "\x1B[33m[Server]\x1B[0m "
 #define ERROR_HEAD  SERVER_HEAD "\x1B[91;1mERROR\x1B[0m: "
 #define SUCCESS_HEAD  SERVER_HEAD "\x1B[92;1mSUCCESS\x1B[0m: "
+#else
+#define SERVER_HEAD "[Server] "
+#define ERROR_HEAD  SERVER_HEAD "ERROR: "
+#define SUCCESS_HEAD  SERVER_HEAD "SUCCESS: "
+#endif
 
 // define backlog
 #define LISTENQ 5
@@ -197,13 +204,19 @@ void trySendToClientAgain(int clientId) {
 }
 
 void sendNameToClient(int clientId, const char *name) {
+#ifdef BETTER_PRINT
   sendToClient(clientId, "\x1B[92m");
+#endif
   sendToClient(clientId, name);
+#ifdef BETTER_PRINT
   sendToClient(clientId, "\x1B[0m");
+#endif
 }
 
 void sendMessageToClient(int clientId, char *msg) {
+#ifdef BETTER_PRINT
   sendToClient(clientId, "\x1B[93m");
+#endif
   // replace all control chars with space
   int i;
   for (i = 0; msg[i]; i++) {
@@ -212,7 +225,9 @@ void sendMessageToClient(int clientId, char *msg) {
     }
   }
   sendToClient(clientId, msg);
+#ifdef BETTER_PRINT
   sendToClient(clientId, "\x1B[0m");
+#endif
 }
 
 void errorCommand(int clientId) {
