@@ -213,7 +213,7 @@ void sendNameToClient(int clientId, const char *name) {
 #endif
 }
 
-void sendMessageToClient(int clientId, char *msg) {
+void sendMessageToClient(int clientId, unsigned char *msg) {
 #ifdef BETTER_PRINT
   sendToClient(clientId, "\x1B[93m");
 #endif
