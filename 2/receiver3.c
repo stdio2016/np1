@@ -1,13 +1,11 @@
-// use setsockopt() timeout
+// use alarm() timeout
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-//#include <unistd.h>
 #define MAX_PACK_SIZE 548
 #define SILLY_ACK 1
 #define SILLY_INIT 2
@@ -34,8 +32,8 @@ int waitTime[40] = {
 };
 
 int sockfd;
+union good_sockaddr cliaddr;
 int currentSN;
-FILE *fileToSend;
 
 void QQ(const char *x) {
   fprintf( stderr, "%s\n", x);
@@ -88,12 +86,14 @@ void longTimeout() {
   }
 }
 
-void buildConnection(char *ipStr, char *portStr) {
+void initReceiver(char *portStr) {
   union good_sockaddr servaddr;
-  if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+  sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sockfd < 0) {
     fprintf( stderr, "unable to create socket\n" );
-    exit(1);
+    exit(2);
   }
+
   memset(&servaddr, 0, sizeof (servaddr));
   servaddr.in.sin_family = AF_INET;
   int port;
@@ -102,21 +102,23 @@ void buildConnection(char *ipStr, char *portStr) {
     exit(1);
   }
   servaddr.in.sin_port = htons(port);
-  if (inet_pton(AF_INET, ipStr, &servaddr.in.sin_addr.s_addr) == 0) {
-    fprintf( stderr, "Invalid IP format\n" );
-    exit(1);
+  servaddr.in.sin_addr.s_addr = htonl(INADDR_ANY);
+  int ret = bind(sockfd, &servaddr.sa, sizeof(servaddr));
+  if (ret != 0) {
+    if (errno == EADDRINUSE) {
+      fprintf( stderr, "port %d already in use\n", port );
+    }
+    else {
+      fprintf( stderr, "bind error\n" );
+    }
+    exit(2);
   }
-  else if (connect(sockfd, &servaddr.sa, sizeof(servaddr)) < 0) {
-    fprintf( stderr, "unable to connect to server\n" );
-    exit(1);
-  }
-
-  longTimeout();
 }
 
-int tryToGetAck(char type) {
+unsigned char msg[MAX_PACK_SIZE];
+
+int tryToGetFile() {
   while (1) {
-    unsigned char msg[MAX_PACK_SIZE];
     int n = recv(sockfd, msg, MAX_PACK_SIZE, 0);
     if (n < 0) {
       if (errno == ECONNREFUSED) {
@@ -124,82 +126,96 @@ int tryToGetAck(char type) {
       }
       return -1; // failed
     }
-    if (msg[0] == type) {
-      if (getu32(&msg[4]) == currentSN) return 0;
-    }
+    if (msg[0] == SILLY_SEND || msg[0] == SILLY_STOP) {
+      if (getu32(&msg[4]) == currentSN) {
+        currentSN += n-12;
+        return n-12;
+      }
+    } 
   }
   return -1;
 }
 
-void send_file(char *filename) {
-  fileToSend = fopen(filename, "rb");
-  if (fileToSend == NULL) {
-    fprintf(stderr, "Cannot open file %s\n", filename);
-    exit(EXIT_FAILURE);
-  }
-  unsigned char msg[MAX_PACK_SIZE];
-  msg[0] = SILLY_INIT;
-  currentSN = rand();
-  setu32(currentSN, &msg[4]);
-  char *safe = safename(filename);
-  strcpy(&msg[12], safe);
-  int n = strlen(safe);
-  int i;
-  for (i = 0; i < 10; i++) {
-    printf("try to connect %d\n", i+1);
-    send(sockfd, msg, n + 13, 0);
-    int y = tryToGetAck(SILLY_INIT_ACK);
-    if (y == 0) {
-      break;
+int tryToStop() {
+  while (1) {
+    int n = recv(sockfd, msg, MAX_PACK_SIZE, 0);
+    if (n < 0) {
+      if (errno == ECONNREFUSED) {
+        QQ("Connection refused");
+      }
+      return -1; // failed
     }
+    if (msg[0] == SILLY_STOP_REALLY && getu32(&msg[4]) == currentSN) return 0;
   }
-  if (i == 10) QQ("Connection timeout");
-  while (!feof(fileToSend)) {
-    msg[0] = SILLY_SEND;
-    setu32(currentSN, &msg[4]);
-    n = fread(&msg[12], 1, MAX_PACK_SIZE - 12, fileToSend);
-    printf("sending part %d\n", currentSN);
+  return -1;
+}
+
+void sendAck(int type) {
+  int len = sizeof(cliaddr.sa);
+  char buf[12];
+  setu32(currentSN, &buf[4]);
+  buf[0] = type;
+  sendto(sockfd, buf, 12, 0, &cliaddr.sa, len);
+}
+
+void recv_file(char *filename) {
+  printf("receiving file %s\n", filename);
+  FILE *F = fopen(safename(filename), "wb");
+  int r, i;
+  while (msg[0] != SILLY_STOP) {
     for (i = 10; i < 40; i++) {
       shortTimeout(i);
-      send(sockfd, msg, n + 12, 0);
-      currentSN += n;
-      int y = tryToGetAck(SILLY_ACK);
-      if (y == 0) {
-        break;
-      }
-      currentSN -= n;
+      r = tryToGetFile();
+      if (r >= 0) break;
+      sendAck(SILLY_ACK);
     }
-    if (i == 40) QQ("Connection timeout");
-  }
-  fclose(fileToSend);
-  printf("file ends\n");
-  for (i = 10; i < 40; i++) {
-    msg[0] = SILLY_STOP;
-    setu32(currentSN, &msg[4]);
-    shortTimeout(i);
-    send(sockfd, msg, 12, 0);
-    int y = tryToGetAck(SILLY_STOP_ACK);
-    if (y == 0) {
-      break;
+    if (i == 40) {
+      printf("connection timeout QQ\n");
+      return ;
+    }
+    if (msg[0] == SILLY_STOP) {
+      printf("file end!\n");
+    }
+    else {
+      fwrite(&msg[12], 1, r, F);
+      sendAck(SILLY_ACK);
     }
   }
-  if (i == 40) QQ("Connection timeout");
-  {
-    msg[0] = SILLY_STOP_REALLY;
-    setu32(currentSN, &msg[4]);
+  for (i = 10; i < 32; i++) {
     shortTimeout(i);
-    send(sockfd, msg, 12, 0);
+    sendAck(SILLY_STOP_ACK);
+    r = tryToStop();
+    if (r == 0) break;
   }
+  fclose(F);
 }
 
 int main(int argc, char *argv[])
 {
-  if (argc < 4) {
-    printf("Usage: %s <receiver IP> <receiver port> <file name>\n", argv[0]);
+  if (argc < 2) {
+    printf("Usage: %s <port>\n", argv[0]);
     return 1;
   }
-  buildConnection(argv[1], argv[2]);
-  srand(time(NULL));
-  send_file(argv[3]);
+  initReceiver(argv[1]);
+
+  int n;
+  socklen_t len;
+  for (;;) {
+    len = sizeof(cliaddr);
+    longTimeout();
+    n = recvfrom(sockfd, msg, MAX_PACK_SIZE, 0, &cliaddr.sa, &len);
+    if (n < 0) {
+      ;
+    }
+    else {
+      if (n < 12) continue; // format error
+      if (msg[0] != SILLY_INIT) continue;
+      currentSN = getu32(&msg[4]);
+      msg[0] = SILLY_INIT_ACK;
+      shortTimeout(10);
+      n = sendto(sockfd, msg, 12, 0, &cliaddr.sa, len);
+      recv_file(&msg[12]);
+    }
+  }
   return 0;
 }
