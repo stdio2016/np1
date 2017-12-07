@@ -59,6 +59,17 @@ void setu32(unsigned int n, char *b) {
   b[3] = n>>24 & 0xff;
 }
 
+char *safename(char *filename) {
+  int y = 0, slash = 0;
+  while (filename[y]) {
+    if (filename[y] == '/') {
+      slash = y+1;
+    }
+    y++;
+  }
+  return &filename[slash];
+}
+
 void buildConnection(char *ipStr, char *portStr) {
   union good_sockaddr servaddr;
   if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -111,8 +122,9 @@ void send_file(char *filename) {
   msg[0] = SILLY_INIT;
   currentSN = rand();
   setu32(currentSN, &msg[4]);
-  strcpy(&msg[12], filename);
-  int n = strlen(filename);
+  char *safe = safename(filename);
+  strcpy(&msg[12], safe);
+  int n = strlen(safe);
   int i;
   for (i = 0; i < 10; i++) {
     alarm(1);
@@ -129,7 +141,7 @@ void send_file(char *filename) {
     setu32(currentSN, &msg[4]);
     n = fread(&msg[12], 1, MAX_PACK_SIZE - 12, fileToSend);
     printf("sending part %d\n", currentSN);
-    for (i = 0; i < 40; i++) {
+    for (i = 10; i < 40; i++) {
       ualarm(waitTime[i], 0);
       send(sockfd, msg, n + 12, 0);
       currentSN += n;
@@ -143,7 +155,7 @@ void send_file(char *filename) {
   }
   fclose(fileToSend);
   printf("file ends\n");
-  for (i = 0; i < 40; i++) {
+  for (i = 10; i < 40; i++) {
     msg[0] = SILLY_STOP;
     setu32(currentSN, &msg[4]);
     ualarm(waitTime[i], 0);

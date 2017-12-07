@@ -58,6 +58,17 @@ void setu32(unsigned int n, char *b) {
   b[3] = n>>24 & 0xff;
 }
 
+char *safename(char *filename) {
+  int y = 0, slash = 0;
+  while (filename[y]) {
+    if (filename[y] == '/') {
+      slash = y+1;
+    }
+    y++;
+  }
+  return &filename[slash];
+}
+
 void initReceiver(char *portStr) {
   union good_sockaddr servaddr;
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -134,13 +145,10 @@ void sendAck(int type) {
 
 void recv_file(char *filename) {
   printf("receiving file %s\n", filename);
-  char safename[999];
-  strcpy(safename, filename);
-  strcat(safename, "_");
-  FILE *F = fopen(safename, "wb");
+  FILE *F = fopen(safename(filename), "wb");
   int r, i;
   while (msg[0] != SILLY_STOP) {
-    for (i = 0; i < 40; i++) {
+    for (i = 10; i < 40; i++) {
       ualarm(waitTime[i], 0);
       r = tryToGetFile();
       if (r >= 0) break;
@@ -158,7 +166,7 @@ void recv_file(char *filename) {
       sendAck(SILLY_ACK);
     }
   }
-  for (i = 0; i < 40; i++) {
+  for (i = 10; i < 40; i++) {
     sendAck(SILLY_STOP_ACK);
     ualarm(waitTime[i], 0);
     r = tryToStop();
