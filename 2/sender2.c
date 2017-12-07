@@ -8,7 +8,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-//#include <unistd.h>
 #define MAX_PACK_SIZE 548
 #define SILLY_ACK 1
 #define SILLY_INIT 2

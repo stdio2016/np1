@@ -1,4 +1,4 @@
-// use alarm() timeout
+// use setsockopt() timeout
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
