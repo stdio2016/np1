@@ -116,7 +116,7 @@ void buildConnection(char *ipStr, char *portStr) {
     exit(1);
   }
   else if (connect(sockfd, &servaddr.sa, sizeof(servaddr)) < 0) {
-    fprintf( stderr, "unable to connect to server\n" );
+    fprintf( stderr, "unable to connect to receiver\n" );
     exit(1);
   }
 }
@@ -170,7 +170,7 @@ void sendNewFilePart(unsigned int size) {
   gettimeofday(&N->time, NULL);
   N->resent = 0;
 
-  printf("send new part %u size %d\n", N->sn - initSN, n);
+  //printf("send new part %u size %d\n", N->sn - initSN, n);
   sendPacket(N->msg, currentSN, N->size);
   checkbuf[currentSN & FILE_BUF_WRAP] = packetId;
   nackedBytes += n;
@@ -185,7 +185,7 @@ void sendNewFilePart(unsigned int size) {
 void sendOldFilePart() {
   if (resentPtr == &unacked) resentPtr = unacked.next;
   if (resentPtr == &unacked) return ;
-  printf("resend part %u size %d\n", resentPtr->sn - resentPtr->size - initSN, resentPtr->size);
+  //printf("resend part %u size %d\n", resentPtr->sn - resentPtr->size - initSN, resentPtr->size);
   resentPtr->resent = 1;
   sendPacket(resentPtr->msg, resentPtr->sn - resentPtr->size, resentPtr->size);
   resentPtr = resentPtr->next;
@@ -238,9 +238,8 @@ int recvMaybeAck() {
   }
 
   int c = recvAck(ackedSN, recvSN);
-  printf("receiver acked %d dup %d\n", ackedSN - initSN, dupAck);
+  //printf("receiver acked %d dup %d\n", ackedSN - initSN, dupAck);
   if (!c) {
-    printf("strange ack\n");
     return 0;
   }
   // selective ack
@@ -306,6 +305,7 @@ void initsendfile(char *name) {
 
 void sendfile(char *name) {
   initsendfile(name);
+  printf("connected\n");
   do {
     if (!feof(fileToSend) && currentSN - ackedSN < FILE_BUF_SIZE - 1 && nackedBytes < windowSize - 1) {
       int can = MAX_PACK_SIZE - 12;
@@ -314,24 +314,52 @@ void sendfile(char *name) {
       sendNewFilePart(can);
     }
     else {
+      ualarm(timeout, 0);
+      isTimeout = 0;
       recvPackSize = recv(sockfd, recvbuf, MAX_PACK_SIZE, 0);
       if (recvPackSize == -1) {
         if (errno == EINTR) {
+          resentPtr = unacked.next;
           sendOldFilePart();
         }
-        else {
-          printf("error %d\n", errno);
+        else if (errno == ECONNREFUSED) {
+          QQ("connection refused");
         }
       }
       else {
+        ualarm(0,0);
         int r = recvMaybeAck();
-        if (r && dupAck > 2) {
+        if (r) {
+          if (dupAck >= 3) {
+            resentPtr = unacked.next;
+          }
+          else {
+            printf("\x1B[Fsent %d\n", ackedSN - initSN);
+          }
           sendOldFilePart();
         }
       }
     }
   } while (!feof(fileToSend) || currentSN != ackedSN);
-  sendPacket(SILLY_STOP, currentSN, 0);
+  int i;
+  for (i = 0; i < 10; i++) {
+    sendPacket(SILLY_STOP, currentSN, 0);
+    ualarm(timeout, 0);
+    isTimeout = 0;
+    recvPackSize = recv(sockfd, recvbuf, MAX_PACK_SIZE, 0);
+    if (recvPackSize == -1) {
+      if (errno == EINTR) {
+        ;
+      }
+      else if (errno == ECONNREFUSED) {
+        QQ("connection refused");
+      }
+      else {
+        printf("Unknown error %d\n", errno);
+        QQ("I give up.");
+      }
+    }
+  }
 }
 
 int main(int argc, char *argv[])
