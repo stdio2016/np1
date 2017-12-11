@@ -42,15 +42,16 @@ struct SentPacket {
 };
 
 int sockfd;
+unsigned int initSN;
 unsigned int currentSN; // data sent
 unsigned int ackedSN; // data acked
 unsigned int nackedBytes;
-unsigned int windowSize = 65535;
+unsigned int windowSize = 536;
 FILE *fileToSend;
 unsigned int recvPackSize;
 int dupAck = 0;
 unsigned char sendbuf[MAX_PACK_SIZE], recvbuf[MAX_PACK_SIZE];
-int rcvrVersion = 1; // 1: stop and wait, 2: selected ACK
+int rcvrVersion = 1; // 1: stop and wait, 2: selective ACK
 
 unsigned int timeout = 100000; // time in microseconds
 
@@ -90,6 +91,10 @@ char *safename(char *filename) {
     y++;
   }
   return &filename[slash];
+}
+
+int min(int a, int b) {
+  return a > b ? b : a;
 }
 
 void buildConnection(char *ipStr, char *portStr) {
@@ -165,6 +170,7 @@ void sendNewFilePart(unsigned int size) {
   gettimeofday(&N->time, NULL);
   N->resent = 0;
 
+  printf("send new part %u size %d\n", N->sn - initSN, n);
   sendPacket(N->msg, currentSN, N->size);
   checkbuf[currentSN & FILE_BUF_WRAP] = packetId;
   nackedBytes += n;
@@ -179,8 +185,9 @@ void sendNewFilePart(unsigned int size) {
 void sendOldFilePart() {
   if (resentPtr == &unacked) resentPtr = unacked.next;
   if (resentPtr == &unacked) return ;
+  printf("resend part %u size %d\n", resentPtr->sn - resentPtr->size - initSN, resentPtr->size);
   resentPtr->resent = 1;
-  sendPacket(resentPtr->msg, resentPtr->sn, resentPtr->size);
+  sendPacket(resentPtr->msg, resentPtr->sn - resentPtr->size, resentPtr->size);
   resentPtr = resentPtr->next;
 }
 
@@ -193,13 +200,14 @@ void dsuUnion(struct SentPacket *a, struct SentPacket *b) {
   a->next = dsuFind(b);
 }
 
-void recvAck(unsigned from, unsigned to) {
+int recvAck(unsigned from, unsigned to) {
   unsigned f = from & FILE_BUF_WRAP;
-  if (checkbuf[f] == 0) return ; // this ack is not supported
+  if (checkbuf[f] == 0) return 0; // this ack is not supported
   struct SentPacket *ptr = dsuFind(&sendpack[checkbuf[f]]);
   while (ptr != &unacked && to - ptr->sn < FILE_BUF_SIZE) {
     if (ptr->sn - ptr->size == ackedSN) ackedSN = ptr->sn;
     ptr->msg = 0;
+    nackedBytes -= ptr->size;
     ptr->next->prev = ptr->prev;
     ptr->prev->next = ptr->next;
     if (ptr == resentPtr) resentPtr = ptr->next;
@@ -208,16 +216,20 @@ void recvAck(unsigned from, unsigned to) {
     dsuUnion(ptr, &sendpack[checkbuf[f]]);
     ptr = ptr->next;
   }
+  return 1;
 }
 
 int recvMaybeAck() {
+  if (recvPackSize < 12) {
+    return 0;
+  }
   unsigned char msg = recvbuf[0];
   unsigned int offset = recvbuf[1];
   if (offset < 3) offset = 3;
   if (!(msg & SILLY_ACK)) return 0; // not an ack
   unsigned recvSN = getu32(&recvbuf[4]);
   if (recvSN == ackedSN) dupAck++;
-  else dupAck = 0;
+  else dupAck = 1;
   if (recvSN - ackedSN > currentSN - ackedSN) { // out of range
     return 0;
   }
@@ -225,14 +237,20 @@ int recvMaybeAck() {
     return SILLY_STOP_ACK;
   }
 
-  recvAck(ackedSN, recvSN);
+  int c = recvAck(ackedSN, recvSN);
+  printf("receiver acked %d dup %d\n", ackedSN - initSN, dupAck);
+  if (!c) {
+    printf("strange ack\n");
+    return 0;
+  }
+  // selective ack
   int i;
-  for (i = offset * 4; i < recvPackSize; i += 8) {
+  for (i = offset * 4; i <= recvPackSize - 8; i += 8) {
     unsigned a = getu32(&recvbuf[i]);
     if (a - ackedSN > currentSN - ackedSN) { // out of range
       continue;
     }
-    unsigned b = getu32(&recvbuf[i]);
+    unsigned b = getu32(&recvbuf[i+4]);
     if (b - ackedSN > currentSN - ackedSN) { // out of range
       continue;
     }
@@ -261,7 +279,7 @@ int waitInitAck() {
 
 void initsendfile(char *name) {
   int i;
-  currentSN = rand();
+  initSN = currentSN = rand();
   char *safe = safename(name);
   strcpy(sendbuf + 12, safe);
   int n = strlen(safe) + 1;
@@ -277,8 +295,9 @@ void initsendfile(char *name) {
   if (i == 10) QQ("Connection timeout QQ\n");
   if (recvPackSize == 16) {
     // check receiver version
-    if (getu32(&recvbuf[12]) == 20169487) {
+    if (getu32(&recvbuf[12]) == 0x20169487) {
       rcvrVersion = 2;
+      windowSize = 65535;
     }
   }
   ackedSN = currentSN;
@@ -288,11 +307,29 @@ void initsendfile(char *name) {
 void sendfile(char *name) {
   initsendfile(name);
   do {
-    if (currentSN - ackedSN < FILE_BUF_SIZE) {
-      sendNewFilePart(MAX_PACK_SIZE - 12);
-      if (rcvrVersion == 1) break;
+    if (!feof(fileToSend) && currentSN - ackedSN < FILE_BUF_SIZE - 1 && nackedBytes < windowSize - 1) {
+      int can = MAX_PACK_SIZE - 12;
+      can = min(can, windowSize - nackedBytes);
+      can = min(can, FILE_BUF_SIZE - (currentSN - ackedSN));
+      sendNewFilePart(can);
     }
-    printf("sending part %d\n", currentSN);
+    else {
+      recvPackSize = recv(sockfd, recvbuf, MAX_PACK_SIZE, 0);
+      if (recvPackSize == -1) {
+        if (errno == EINTR) {
+          sendOldFilePart();
+        }
+        else {
+          printf("error %d\n", errno);
+        }
+      }
+      else {
+        int r = recvMaybeAck();
+        if (r && dupAck > 2) {
+          sendOldFilePart();
+        }
+      }
+    }
   } while (!feof(fileToSend) || currentSN != ackedSN);
   sendPacket(SILLY_STOP, currentSN, 0);
 }
@@ -312,6 +349,11 @@ int main(int argc, char *argv[])
   srand(time(NULL));
   signal(SIGALRM, sig_alarm);
   siginterrupt(SIGALRM, 1);
+
+  struct timeval start, end;
+  gettimeofday(&start, NULL);
   sendfile(argv[3]);
+  gettimeofday(&end, NULL);
+  printf("It took %f seconds\n", (end.tv_sec - start.tv_sec) + 1e-6 * (end.tv_usec - start.tv_usec));
   return 0;
 }
