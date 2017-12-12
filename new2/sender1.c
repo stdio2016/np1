@@ -23,10 +23,6 @@
 #define FILE_BUF_SIZE  (MAX_WINDOW_SIZE+1)
 #define FILE_BUF_WRAP  (FILE_BUF_SIZE-1)
 
-enum ConnectionState {
-  START, WAIT, FINISH
-} state;
-
 union good_sockaddr {
   struct sockaddr sa;
   struct sockaddr_in in;
@@ -48,6 +44,7 @@ unsigned int ackedSN; // data acked
 unsigned int nackedBytes;
 unsigned int windowSize = 536;
 FILE *fileToSend;
+int fileEnds = 0;
 unsigned int recvPackSize;
 int dupAck = 0;
 unsigned char sendbuf[MAX_PACK_SIZE], recvbuf[MAX_PACK_SIZE];
@@ -61,7 +58,7 @@ struct SentPacket sendpack[MAX_SEND_PACKET];
 struct SentPacket unacked = {&unacked, &unacked}, *resentPtr = &unacked;
 int packetId = 1;
 
-volatile sig_atomic_t isTimeout;
+volatile sig_atomic_t isTimeout = 0;
 void sig_alarm(int a) {
   isTimeout = 1;
 }
@@ -158,6 +155,7 @@ void sendNewFilePart(unsigned int size) {
     n = fread(filebuf + start, 1, size, fileToSend);
     memset(checkbuf + start, 0, sizeof(int) * n);
   }
+  if (n == 0) fileEnds = 1;
 
   struct SentPacket *N = &sendpack[packetId];
   unacked.prev->next = N;
@@ -182,13 +180,15 @@ void sendNewFilePart(unsigned int size) {
   }
 }
 
-void sendOldFilePart() {
+int sendOldFilePart() {
   if (resentPtr == &unacked) resentPtr = unacked.next;
-  if (resentPtr == &unacked) return ;
+  if (resentPtr == &unacked) return 0;
   //printf("resend part %u size %d\n", resentPtr->sn - resentPtr->size - initSN, resentPtr->size);
   resentPtr->resent = 1;
+  int n = resentPtr->size;
   sendPacket(resentPtr->msg, resentPtr->sn - resentPtr->size, resentPtr->size);
   resentPtr = resentPtr->next;
+  return n;
 }
 
 struct SentPacket *dsuFind(struct SentPacket *from) {
@@ -243,8 +243,8 @@ int recvMaybeAck() {
     return 0;
   }
   // selective ack
-  int i;
-  for (i = offset * 4; i <= recvPackSize - 8; i += 8) {
+  int i, n;
+  for (i = offset * 4, n = 0 ; i <= recvPackSize - 8 && n < 4; i += 8, n++) {
     unsigned a = getu32(&recvbuf[i]);
     if (a - ackedSN > currentSN - ackedSN) { // out of range
       continue;
@@ -280,8 +280,11 @@ void initsendfile(char *name) {
   int i;
   initSN = currentSN = rand();
   char *safe = safename(name);
-  strcpy(sendbuf + 12, safe);
-  int n = strlen(safe) + 1;
+  int n = min(strlen(safe), 256);
+  memcpy(sendbuf + 12, safe, n);
+  sendbuf[12 + n] = '\0';
+  setu32(0x20169487, &sendbuf[12 + n+1]);
+  n += 5;
   for (i = 0; i < 10; i++) {
     alarm(1);
     printf("try to connect %d\n", i+1);
@@ -291,7 +294,7 @@ void initsendfile(char *name) {
       break;
     }
   }
-  if (i == 10) QQ("Connection timeout QQ\n");
+  if (i == 10) QQ("Connection timeout QQ");
   if (recvPackSize == 16) {
     // check receiver version
     if (getu32(&recvbuf[12]) == 0x20169487) {
@@ -299,15 +302,17 @@ void initsendfile(char *name) {
       windowSize = 65535;
     }
   }
+  printf("connected, its version is %d\n\n", rcvrVersion);
   ackedSN = currentSN;
   nackedBytes = 0;
 }
 
 void sendfile(char *name) {
+  int tries = 0;
   initsendfile(name);
-  printf("connected\n");
   do {
-    if (!feof(fileToSend) && currentSN - ackedSN < FILE_BUF_SIZE - 1 && nackedBytes < windowSize - 1) {
+    if (!fileEnds && currentSN - ackedSN < FILE_BUF_SIZE - 1
+    && nackedBytes < windowSize - 1) {
       int can = MAX_PACK_SIZE - 12;
       can = min(can, windowSize - nackedBytes);
       can = min(can, FILE_BUF_SIZE - (currentSN - ackedSN));
@@ -320,10 +325,17 @@ void sendfile(char *name) {
       if (recvPackSize == -1) {
         if (errno == EINTR) {
           resentPtr = unacked.next;
+          timeout = min(timeout + (timeout >> 3), 999999);
+          tries++;
+          if (tries == 30) QQ("Connection timeout QQ");
           sendOldFilePart();
         }
         else if (errno == ECONNREFUSED) {
           QQ("connection refused");
+        }
+        else {
+          printf("Unknown error %d\n", errno);
+          QQ("I give up.");
         }
       }
       else {
@@ -338,11 +350,13 @@ void sendfile(char *name) {
           }
           sendOldFilePart();
         }
+        timeout = 100000;
+        tries = 0;
       }
     }
-  } while (!feof(fileToSend) || currentSN != ackedSN);
+  } while (!fileEnds || currentSN != ackedSN);
   int i;
-  for (i = 0; i < 10; i++) {
+  for (i = 0; i < 20; i++) {
     sendPacket(SILLY_STOP, currentSN, 0);
     ualarm(timeout, 0);
     isTimeout = 0;
@@ -359,6 +373,17 @@ void sendfile(char *name) {
         QQ("I give up.");
       }
     }
+    int r = recvMaybeAck();
+    if (r == SILLY_STOP_ACK) {
+      break;
+    }
+    timeout = timeout + (timeout>>3);
+  }
+  printf("Wait 3 secs to make sure the receiver is closed\n");
+  for (i = 0; i < 30; i++) {
+    usleep(timeout);
+    errno = 0;
+    sendPacket(SILLY_STOP_ACK, ackedSN, 0);
   }
 }
 
@@ -381,6 +406,7 @@ int main(int argc, char *argv[])
   struct timeval start, end;
   gettimeofday(&start, NULL);
   sendfile(argv[3]);
+  fclose(fileToSend);
   gettimeofday(&end, NULL);
   printf("It took %f seconds\n", (end.tv_sec - start.tv_sec) + 1e-6 * (end.tv_usec - start.tv_usec));
   return 0;
