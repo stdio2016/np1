@@ -34,9 +34,10 @@ union good_sockaddr cliaddr;
 unsigned int initSN;
 unsigned int currentSN; // data sent
 unsigned int ackedSN; // data acked
+unsigned int recvSN; // received SN
 unsigned int windowSize = 65535;
 FILE *fileToRecv;
-unsigned int recvPackSize;
+unsigned int recvPackSize, recvDataSize;
 unsigned char sendbuf[MAX_PACK_SIZE], recvbuf[MAX_PACK_SIZE];
 int senderVersion = 1; // 1: stop and wait, 2: selective ACK
 
@@ -126,6 +127,52 @@ void sendPacket(int msgType, unsigned int sn, unsigned int datasize) {
   sendto(sockfd, sendbuf, datasize + 12, 0, &cliaddr.sa, len);
 }
 
+int sacked;
+
+void storeFile() {
+  if (!insideRange(recvSN, ackedSN, ackedSN+windowSize)
+   || !insideRange(recvSN + recvDataSize, ackedSN, ackedSN+windowSize)) {
+    return ;
+  }
+  if (!insideRange(recvSN + recvDataSize, ackedSN, currentSN)) {
+    currentSN = recvSN + recvDataSize;
+  }
+  // store into buffer
+  int i;
+  for (i = 0; i < recvDataSize; i++) {
+    checkbuf[(recvSN+i) & FILE_BUF_WRAP] = 1;
+  }
+
+  unsigned j = recvSN & FILE_BUF_WRAP;
+  unsigned k = (recvSN + recvDataSize) & FILE_BUF_WRAP;
+  char *dat = recvbuf + recvPackSize - recvDataSize;
+  if (j <= k) {
+    memcpy(&filebuf[j], dat, recvDataSize);
+  }
+  else {
+    int slice = FILE_BUF_SIZE-j;
+    memcpy(&filebuf[j], dat, slice);
+    memcpy(filebuf, &dat[slice], recvDataSize-slice);
+  }
+
+  // write to file
+  i = 0;
+  j = ackedSN & FILE_BUF_WRAP;
+  while (checkbuf[ackedSN & FILE_BUF_WRAP] == 1) {
+    checkbuf[ackedSN & FILE_BUF_WRAP] = 0;
+    ackedSN++; i++;
+  }
+  k = ackedSN & FILE_BUF_WRAP;
+  if (j > k) {
+    int slice = FILE_BUF_SIZE-j;
+    fwrite(&filebuf[j], 1, slice, fileToRecv);
+    fwrite(filebuf, 1, i - slice, fileToRecv);
+  }
+  else {
+    fwrite(&filebuf[j], 1, i, fileToRecv);
+  }
+}
+
 int mayRecvFile() {
   union good_sockaddr a;
   socklen_t len = sizeof a;
@@ -146,17 +193,15 @@ int mayRecvFile() {
   unsigned char msg = recvbuf[0];
   unsigned int offset = recvbuf[1];
   if (offset < 3 || senderVersion == 1) offset = 3;
-  int datasize = recvPackSize - offset * 4;
-  if (datasize < 0) return 0;
-  unsigned recvSN = getu32(&recvbuf[4]);
+  recvDataSize = recvPackSize - offset * 4;
+  if (recvDataSize < 0) return 0;
+  recvSN = getu32(&recvbuf[4]);
   // check if in range [current-window, acked+window)
-  if (!insideRange(recvSN, currentSN-windowSize, ackedSN+windowSize)) {
+  if (!insideRange(recvSN, currentSN-windowSize, ackedSN+windowSize)
+   || !insideRange(recvSN + recvDataSize, currentSN-windowSize, ackedSN+windowSize)) {
     return 0;
   }
-  if (recvSN == ackedSN) {
-    ackedSN += datasize;
-    currentSN = ackedSN;
-  }
+
   if (msg == SILLY_STOP) {
     return SILLY_STOP;
   }
@@ -168,19 +213,22 @@ int mayRecvFile() {
 }
 
 void recv_file(char *name) {
-  name = safename(name);
   printf("receiving file %s\n", name);
   int y = 0;
   int death = 0;
   isTimeout = 0;
   ualarm(timeout, 0);
+  memset(checkbuf, 0, sizeof checkbuf);
   while (y != SILLY_STOP || currentSN != ackedSN) {
     y = mayRecvFile();
     if (y == SILLY_SEND) {
-      sendPacket(SILLY_ACK, ackedSN, 0);
+      storeFile();
+      printf("received %u ack %u cur %u\n", recvSN - initSN, ackedSN - initSN, currentSN - initSN);
+      sendPacket(SILLY_ACK, ackedSN, sacked * 8);
     }
     else if (y == SILLY_INIT) {
-      sendPacket(SILLY_INIT_ACK, ackedSN, 0);
+      setu32(0x20169487, &sendbuf[12]);
+      sendPacket(SILLY_INIT_ACK, ackedSN, senderVersion == 2 ? 4 : 0);
     }
     else if (y < 0) {
       death++;
@@ -246,7 +294,15 @@ int main(int argc, char *argv[])
       }
       printf("sender version is %d\n", senderVersion);
       sendPacket(SILLY_INIT_ACK, currentSN, n);
-      recv_file(&recvbuf[12]);
+      char *name = safename(&recvbuf[12]);
+      fileToRecv = fopen(name, "wb");
+      if (fileToRecv == NULL) {
+        printf("cannot write to %s", name);
+      }
+      else {
+        recv_file(name);
+        fclose(fileToRecv);
+      }
       gettimeofday(&end, NULL);
       printf("It took %f seconds\n", (end.tv_sec - start.tv_sec) + 1e-6 * (end.tv_usec - start.tv_usec));
     }

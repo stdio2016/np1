@@ -57,6 +57,7 @@ unsigned int checkbuf[FILE_BUF_SIZE] = {0};
 struct SentPacket sendpack[MAX_SEND_PACKET];
 struct SentPacket unacked = {&unacked, &unacked}, *resentPtr = &unacked;
 int packetId = 1;
+long totalBytesSent = 0;
 
 volatile sig_atomic_t isTimeout = 0;
 void sig_alarm(int a) {
@@ -137,6 +138,7 @@ void sendPacket(int msgType, unsigned int sn, unsigned int datasize) {
     }
   }
   send(sockfd, sendbuf, datasize + 12, 0);
+  totalBytesSent += datasize + 12;
 }
 
 void sendNewFilePart(unsigned int size) {
@@ -164,11 +166,13 @@ void sendNewFilePart(unsigned int size) {
   unacked.prev = N;
   N->size = n;
   N->sn = currentSN + n;
-  N->msg = n == 0 ? SILLY_STOP : SILLY_SEND;
+  N->msg = SILLY_SEND;
   gettimeofday(&N->time, NULL);
   N->resent = 0;
 
-  //printf("send new part %u size %d\n", N->sn - initSN, n);
+#ifdef DEBUG
+  printf("send new part %u size %d\n", N->sn - initSN, n);
+#endif
   sendPacket(N->msg, currentSN, N->size);
   checkbuf[currentSN & FILE_BUF_WRAP] = packetId;
   nackedBytes += n;
@@ -183,7 +187,9 @@ void sendNewFilePart(unsigned int size) {
 int sendOldFilePart() {
   if (resentPtr == &unacked) resentPtr = unacked.next;
   if (resentPtr == &unacked) return 0;
-  //printf("resend part %u size %d\n", resentPtr->sn - resentPtr->size - initSN, resentPtr->size);
+#ifdef DEBUG
+  printf("resend part %u size %d\n", resentPtr->sn - resentPtr->size - initSN, resentPtr->size);
+#endif
   resentPtr->resent = 1;
   int n = resentPtr->size;
   sendPacket(resentPtr->msg, resentPtr->sn - resentPtr->size, resentPtr->size);
@@ -238,7 +244,9 @@ int recvMaybeAck() {
   }
 
   int c = recvAck(ackedSN, recvSN);
-  //printf("receiver acked %d dup %d\n", ackedSN - initSN, dupAck);
+#ifdef DEBUG
+  printf("receiver acked %d dup %d\n", ackedSN - initSN, dupAck);
+#endif
   if (!c) {
     return 0;
   }
@@ -344,11 +352,14 @@ void sendfile(char *name) {
         if (r) {
           if (dupAck >= 3) {
             resentPtr = unacked.next;
+            sendOldFilePart();
           }
           else {
+#ifndef DEBUG
             printf("\x1B[Fsent %d\n", ackedSN - initSN);
+#endif
           }
-          sendOldFilePart();
+
         }
         timeout = 100000;
         tries = 0;
@@ -379,6 +390,7 @@ void sendfile(char *name) {
     }
     timeout = timeout + (timeout>>3);
   }
+  timeout = 100000;
   printf("Wait 3 secs to make sure the receiver is closed\n");
   for (i = 0; i < 30; i++) {
     usleep(timeout);
@@ -409,5 +421,6 @@ int main(int argc, char *argv[])
   fclose(fileToSend);
   gettimeofday(&end, NULL);
   printf("It took %f seconds\n", (end.tv_sec - start.tv_sec) + 1e-6 * (end.tv_usec - start.tv_usec));
+  printf("%ld bytes sent\n", totalBytesSent);
   return 0;
 }
