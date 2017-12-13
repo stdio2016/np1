@@ -228,7 +228,7 @@ void recv_file(char *name) {
     }
     else if (y == SILLY_INIT) {
       setu32(0x20169487, &sendbuf[12]);
-      sendPacket(SILLY_INIT_ACK, ackedSN, senderVersion == 2 ? 4 : 0);
+      sendPacket(SILLY_INIT_ACK, ackedSN, senderVersion == 3 ? 4 : 0);
     }
     else if (y < 0) {
       death++;

@@ -50,7 +50,8 @@ int dupAck = 0;
 unsigned char sendbuf[MAX_PACK_SIZE], recvbuf[MAX_PACK_SIZE];
 int rcvrVersion = 1; // 1: stop and wait, 2: selective ACK
 
-unsigned int timeout = 100000; // time in microseconds
+unsigned int Rto = 26000;
+unsigned int timeout; // time in microseconds
 
 unsigned char filebuf[FILE_BUF_SIZE];
 unsigned int checkbuf[FILE_BUF_SIZE] = {0};
@@ -184,16 +185,26 @@ void sendNewFilePart(unsigned int size) {
   }
 }
 
-int sendOldFilePart() {
+int sendOldFilePart(int mode) {
   if (resentPtr == &unacked) resentPtr = unacked.next;
   if (resentPtr == &unacked) return 0;
+  struct timeval t;
+  gettimeofday(&t, NULL);
+  struct timeval u;
+  timersub(&t, &resentPtr->time, &u);
+  if (mode == 1) {
+    if (u.tv_sec < 0 || u.tv_usec <= Rto) {
+  resentPtr = resentPtr->next;
+      return 0;
+    }
+  }
 #ifdef DEBUG
   printf("resend part %u size %d\n", resentPtr->sn - resentPtr->size - initSN, resentPtr->size);
 #endif
   resentPtr->resent = 1;
   int n = resentPtr->size;
+  resentPtr->time = t;
   sendPacket(resentPtr->msg, resentPtr->sn - resentPtr->size, resentPtr->size);
-  resentPtr = resentPtr->next;
   return n;
 }
 
@@ -208,7 +219,10 @@ void dsuUnion(struct SentPacket *a, struct SentPacket *b) {
 
 int recvAck(unsigned from, unsigned to) {
   unsigned f = from & FILE_BUF_WRAP;
-  if (checkbuf[f] == 0) return 0; // this ack is not supported
+  if (checkbuf[f] == 0) {
+    printf("strange ack position\n");
+    return 0; // this ack is not supported
+  }
   struct SentPacket *ptr = dsuFind(&sendpack[checkbuf[f]]);
   while (ptr != &unacked && to - ptr->sn < FILE_BUF_SIZE) {
     if (ptr->sn - ptr->size == ackedSN) ackedSN = ptr->sn;
@@ -318,6 +332,7 @@ void initsendfile(char *name) {
 void sendfile(char *name) {
   int tries = 0;
   initsendfile(name);
+  timeout = Rto;
   do {
     if (!fileEnds && currentSN - ackedSN < FILE_BUF_SIZE - 1
     && nackedBytes < windowSize - 1) {
@@ -336,7 +351,10 @@ void sendfile(char *name) {
           timeout = min(timeout + (timeout >> 3), 999999);
           tries++;
           if (tries == 30) QQ("Connection timeout QQ");
-          sendOldFilePart();
+          sendOldFilePart(0);
+          //while (&unacked != resentPtr) {
+            sendOldFilePart(1);
+          //}
         }
         else if (errno == ECONNREFUSED) {
           QQ("connection refused");
@@ -348,20 +366,21 @@ void sendfile(char *name) {
       }
       else {
         ualarm(0,0);
+        int t = nackedBytes;
         int r = recvMaybeAck();
         if (r) {
-          if (dupAck >= 3) {
-            resentPtr = unacked.next;
-            sendOldFilePart();
+          if (dupAck == 3) {
+            if (dupAck == 3) resentPtr = unacked.next;
+            sendOldFilePart(1);
           }
           else {
 #ifndef DEBUG
             printf("\x1B[Fsent %d\n", ackedSN - initSN);
 #endif
+            if (nackedBytes < t) sendOldFilePart(1);
           }
-
         }
-        timeout = 100000;
+        timeout = Rto;
         tries = 0;
       }
     }
