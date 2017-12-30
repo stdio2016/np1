@@ -101,57 +101,37 @@ void destroyClient(int clientId) {
   ClientFd[clientId].fd = -1;
 }
 
-void sendToClient(int clientId, const char *msg) {
+void sendToClient(int clientId, const unsigned char *msg) {
   struct mybuff *b = &Clients[clientId].send;
-  if (b->finished < b->end) { // data in buffer, ready to send, but not sent
+  int n = 0;
+  int size = msg[2] << 8 | msg[3];
+  do {
+    n = send(ClientFd[clientId].fd, msg, size, MSG_DONTWAIT);
+  } while (n < 0 && errno == EINTR) ;
+  if (n == size) return; // hooray!
+  if (n == 0) { // connection closed
+    Clients[clientId].closed = 1;
     return ;
   }
-  int all = strlen(msg);
-  int n = 0;
-  if (b->end == 0) {
-    // no data in bufer => try to send to client
-    do {
-      n = send(ClientFd[clientId].fd, msg, all, MSG_DONTWAIT);
-    } while (n < 0 && errno == EINTR) ;
-    if (n == all) return; // hooray!
-    if (n == 0) { // connection closed
+  if (n < 0) {
+    n = 0;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      ;
+    }
+    else { // error or connection closed
       Clients[clientId].closed = 1;
       return ;
     }
-    if (n < 0) {
-      n = 0;
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        ;
-      }
-      else { // error or connection closed
-        Clients[clientId].closed = 1;
-        return ;
-      }
-    }
   }
   // not all are sent
-  int i;
-  for (i = n; i < all; i++) {
-    if (b->end >= b->capacity) {
-      char *newbuf = (char *)realloc(b->buf, b->capacity * 2);
-      if (newbuf == NULL) OutOfMemory() ;
-      b->buf = newbuf;
-      b->capacity = b->capacity * 2;
-    }
-    b->buf[b->end++] = msg[i];
-    if (msg[i] == '\n') break;
-  }
-  if (i < all) { // ready to send
-    b->finished = 0;
-    ClientFd[clientId].events |= POLLWRNORM;
-  }
-  else { // not ready to send
-    b->finished = b->end;
-  }
+  // ready to send
+  b->finished = n;
+  b->size = size;
+  ClientFd[clientId].events |= POLLWRNORM;
 }
 
 void trySendToClientAgain(int clientId) {
-  int all = Clients[clientId].send.end;
+  int all = Clients[clientId].send.size;
   int finished = Clients[clientId].send.finished;
   char *msg = &Clients[clientId].send.buf[finished];
   int n;
@@ -174,7 +154,7 @@ void trySendToClientAgain(int clientId) {
     Clients[clientId].send.finished += n;
     if (Clients[clientId].send.finished == all) { // completed
       Clients[clientId].send.finished = 0;
-      Clients[clientId].send.end = 0;
+      Clients[clientId].send.size = 0;
       ClientFd[clientId].events &= ~POLLWRNORM;
     }
   }
