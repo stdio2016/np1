@@ -1,6 +1,6 @@
 all: client server
-client: client.c
-	gcc -o client client.c
+client: client.o mypack.o
+client.o: client.c mypack.h
 server: server.o mypack.o
 server.o: server.c mypack.h
 mypack.o: mypack.c mypack.h

@@ -36,10 +36,12 @@ int recvPacket(int sock, struct MyPack *buf) {
     buf->finished += n;
   }
   if (buf->finished == 4 && buf->size == 0) {
-    buf->size = buf->buf[3]<<8 | buf->buf[4] + 4;
+    buf->size = getPacketSize(buf) + 4;
+  }
+  if (buf->size > 0) {
     do {
       n = recv(sock, buf->buf, buf->size - buf->finished, MSG_DONTWAIT);
-    } while (n < 0 && (errno == EWOULDBLOCK || errno == EAGAIN) ) ;
+    } while (n < 0 && (errno == EINTR) ) ;
     if (n == 0) return 0;
     if (n < 0) return -1;
     buf->finished += n;
@@ -54,6 +56,8 @@ void setPacketHeader(struct MyPack *p, unsigned type, unsigned size) {
   p->buf[1] = type & 0xFF;
   p->buf[2] = (size>>8) & 0xFF;
   p->buf[3] = size & 0xFF;
+  p->size = size + 4;
+  p->finished = 0;
 }
 
 int sendPacket(int sock, struct MyPack *buf) {

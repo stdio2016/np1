@@ -159,9 +159,7 @@ void processMessage(int clientId, struct MyPack *msg) {
 
 void processClient(int clientId, int socketId) {
   // socketId is socket of client #clientId
-  int still = 1;
-  while (!Clients[clientId].closed && still) {
-    still = 0;
+  if (!Clients[clientId].closed) {
     int n = recvPacket(socketId, &Clients[clientId].recv);
     if (n < 0) {
       if (errno == ECONNRESET || errno == EPIPE) {
@@ -171,7 +169,7 @@ void processClient(int clientId, int socketId) {
         ; // not finished
       }
       else {
-        printf("recvline error\n");
+        printf("recvPacket error\n");
         Clients[clientId].closed = 1;
       }
     }
