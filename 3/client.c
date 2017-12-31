@@ -47,6 +47,7 @@ enum SendState {
 FILE *fileToSend;
 
 int serverClosed = 0;
+char myname[256];
 
 void buildConnection(char *ipStr, char *portStr) {
   union good_sockaddr servaddr;
@@ -165,9 +166,18 @@ void processMessage() {
       free(qi);
       queuePop(&sendQueue);
       isSending = STARTING;
-      if (sendQueue.size == 0) {
-        ServerFd[0].events &= ~POLLWRNORM;
-      }
+    }
+  }
+  if (y == ERROR) {
+    if (isSending == CHECKING) {
+      struct QueueItem *qi = queueFirst(&sendQueue);
+      rewind(fileToSend);
+      isSending = SENDING;
+      int n = strlen(qi->filename);
+      setPacketHeader(&sendServ, PUT, n);
+      memcpy(sendServ.buf+4, qi->filename, n);
+      sendToServer();
+      ServerFd[0].events |= POLLWRNORM;
     }
   }
 }
@@ -175,7 +185,7 @@ void processMessage() {
 void sendQueuedData() {
   struct QueueItem *qi = queueFirst(&sendQueue);
   if (isSending == SENDING) {
-    int big = 65535;
+    int big = 1000;
     int y = fread(sendServ.buf+4, 1, big, fileToSend);
     if (y == 0) {
       setPacketHeader(&sendServ, CHECK, 0);
@@ -215,6 +225,7 @@ void sendQueuedData() {
       memcpy(sendServ.buf+4, qi->filename, n);
       sendToServer();
       isSending = SENDING;
+      ServerFd[0].events |= POLLWRNORM;
     }
   }
   else if (isSending == CHECKING) {
@@ -326,6 +337,18 @@ void readUser() {
   }
 }
 
+void sendNameToServer(char *nm) {
+  size_t n = strlen(nm);
+  if (n > 255) {
+    printf("Username too long!\n");
+    exit(-1);
+  }
+  strcpy(myname, nm);
+  strcpy(sendServ.buf+4, nm);
+  setPacketHeader(&sendServ, NAME, n);
+  sendToServer();
+}
+
 int main(int argc, char *argv[])
 {
   char *username;
@@ -343,6 +366,7 @@ int main(int argc, char *argv[])
   initPacket(&sendServ);
   initPacket(&recvServ);
   queueInit(&sendQueue);
+  sendNameToServer(argv[3]);
   printf("Welcome to the dropbox-like server! : %s\n", username);
   while (!serverClosed) {
     int nready = poll(ServerFd, 2, -1);

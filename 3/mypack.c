@@ -63,7 +63,7 @@ void setPacketHeader(struct MyPack *p, unsigned type, unsigned size) {
 int sendPacket(int sock, struct MyPack *buf) {
   int n;
   do {
-    n = send(sock, buf->buf, buf->size - buf->finished, MSG_DONTWAIT);
+    n = send(sock, buf->buf + buf->finished, buf->size - buf->finished, MSG_DONTWAIT);
   } while (n < 0 && errno == EINTR) ;
   if (n == 0) return 0;
   if (n < 0) return -1;

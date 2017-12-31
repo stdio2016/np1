@@ -63,6 +63,7 @@ struct client_info {
   FILE *fileToRecv;
   int isSending;
   int closed;
+  char recvFilename[256];
 } *Clients;
 struct pollfd *ClientFd;
 // all connected clients
@@ -111,7 +112,7 @@ void initServer(char *portStr) {
 }
 
 void initClient(int clientId, union good_sockaddr addr) {
-  strcpy(Clients[clientId].name, "anonymous");
+  strcpy(Clients[clientId].name, "");
   Clients[clientId].addr = addr;
   Clients[clientId].closed = 0;
   initPacket(&Clients[clientId].recv);
@@ -177,14 +178,23 @@ void trySendToClientAgain(int clientId) {
 
 void processMessage(int clientId, struct MyPack *msg) {
   int y = getPacketType(msg);
-  printf("type %c%c\n", y>>8&0xff,y&0xff);
   if (y == CHECK) {
+    printf("Client %d (%s) uploaded %s\n", clientId,  Clients[clientId].name , Clients[clientId].recvFilename);
     setPacketHeader(&Clients[clientId].send, OK, 0);
     sendToClient(clientId);
   }
-  if (y == DATA) {
-    fwrite(msg->buf+4, 1, getPacketSize(msg), stdout);
-    puts("");
+  else if (y == DATA) {
+    ;
+  }
+  else if (y == NAME) {
+    if (Clients[clientId].name[0] != '\0') return ; // already have name
+    int n = getPacketSize(msg);
+    if (n > 255) {
+      n = 255;
+    }
+    memcpy(Clients[clientId].name, msg->buf+4, n);
+    Clients[clientId].name[n] = '\0';
+    printf("Client %d is now known as %s\n", clientId, Clients[clientId].name);
   }
 }
 
@@ -192,7 +202,7 @@ void sendQueuedData(int clientId) {
   struct MyPack *p = &Clients[clientId].send;
   struct QueueItem *qi = queueFirst(&Clients[clientId].sendQueue);
   if (Clients[clientId].isSending == SENDING) {
-    int big = 65535;
+    int big = 1000;
     int y = fread(p->buf+4, 1, big, Clients[clientId].fileToSend);
     if (y == 0) {
       setPacketHeader(p, CHECK, 0);
