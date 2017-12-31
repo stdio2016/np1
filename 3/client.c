@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/poll.h> // poll()
 #include <sys/socket.h> // connect(), shutdown(), socket(), AF_INET, SOCK_STREAM, SHUT_WR
 #include <netinet/in.h> // struct sockaddr_in, htons()
@@ -10,9 +11,16 @@
 #include <netdb.h> // getaddrinfo(), gai_strerror
 #include <fcntl.h> // fcntl()
 #include "mypack.h"
+#include "queue.h"
 #define MAXLINE 1000
 #define STDIN_FD 0
+
+#define NAME ('N'<<8|'M')
 #define PUT  ('P'<<8|'U')
+#define DATA ('D'<<8|'A')
+#define CHECK ('C'<<8|'H')
+#define OK   ('O'<<8|'K')
+#define ERROR ('E'<<8|'R')
 
 int sockfd; // socket connected to server
 char buf[MAXLINE]; // user input buffer
@@ -28,6 +36,16 @@ union good_sockaddr {
 
 struct pollfd ServerFd[2];
 struct MyPack sendServ, recvServ;
+struct Queue sendQueue;
+struct QueueItem {
+  char *filename;
+  long filesize;
+};
+enum SendState {
+  STARTING, SENDING, CHECKING
+} isSending;
+FILE *fileToSend;
+
 int serverClosed = 0;
 
 void buildConnection(char *ipStr, char *portStr) {
@@ -134,8 +152,80 @@ void trySendToServerAgain() {
   }
 }
 
-void readServer() {
+void processMessage() {
+  int y = getPacketType(&recvServ);
+  if (y == OK) {
+    if (isSending == CHECKING) {
+      struct QueueItem *qi = queueFirst(&sendQueue);
+      int i;
+      printf("\rProgress : [");
+      for (i = 0; i < 32; i++) putchar('#');
+      printf("]"); fflush(stdout);
+      printf("\nUpload %s complete!\n", qi->filename);
+      free(qi);
+      queuePop(&sendQueue);
+      isSending = STARTING;
+      if (sendQueue.size == 0) {
+        ServerFd[0].events &= ~POLLWRNORM;
+      }
+    }
+  }
+}
 
+void sendQueuedData() {
+  struct QueueItem *qi = queueFirst(&sendQueue);
+  if (isSending == SENDING) {
+    int big = 65535;
+    int y = fread(sendServ.buf+4, 1, big, fileToSend);
+    if (y == 0) {
+      setPacketHeader(&sendServ, CHECK, 0);
+      sendToServer();
+      isSending = CHECKING;
+      ServerFd[0].events &= ~POLLWRNORM;
+    }
+    else if (y < 0) {
+      printf("error reading file '%s'!\n", qi->filename);
+      isSending = STARTING;
+    }
+    else {
+      printf("\rProgress : [");
+      float pa = qi->filesize;
+      pa = ftell(fileToSend) / pa * 30;
+      int i;
+      for (i = 0; i < pa; i++) putchar('#');
+      for (; i < 32; i++) putchar(' ');
+      printf("]"); fflush(stdout);
+      setPacketHeader(&sendServ, DATA, y);
+      sendToServer();
+    }
+  }
+  else if (isSending == STARTING) {
+    fileToSend = fopen(qi->filename, "rb");
+    if (fileToSend == NULL) {
+      printf("error opening file '%s'!\n", qi->filename);
+      isSending = STARTING;
+    }
+    else {
+      printf("Uploading file : %s\n", qi->filename);
+      fseek(fileToSend, 0, SEEK_END);
+      qi->filesize = ftell(fileToSend);
+      rewind(fileToSend);
+      int n = strlen(qi->filename);
+      setPacketHeader(&sendServ, PUT, n);
+      memcpy(sendServ.buf+4, qi->filename, n);
+      sendToServer();
+      isSending = SENDING;
+    }
+  }
+  else if (isSending == CHECKING) {
+    ServerFd[0].events &= ~POLLWRNORM;
+  }
+  if (isSending == STARTING) {
+    queuePop(&sendQueue);
+    if (sendQueue.size == 0) {
+      ServerFd[0].events &= ~POLLWRNORM;
+    }
+  }
 }
 
 void processServer() {
@@ -159,11 +249,16 @@ void processServer() {
       serverClosed = 1;
     }
     else {
-      readServer();
+      processMessage();
     }
   }
-  if (!serverClosed && (ServerFd[0].revents & POLLWRNORM)) {
-    trySendToServerAgain();
+  if (!serverClosed && ((ServerFd[0].revents & POLLWRNORM) || sendQueue.size > 0)) {
+    if (packetFinished(&recvServ)) {
+      sendQueuedData();
+    }
+    else {
+      trySendToServerAgain();
+    }
   }
 }
 
@@ -209,9 +304,24 @@ void readUser() {
         printf("Filename too long\n");
         return ;
       }
-      setPacketHeader(&sendServ, PUT, n);
-      memcpy(sendServ.buf+4, arg, n);
-      sendToServer();
+      struct QueueItem *qi = calloc(1, sizeof(*qi));
+      qi->filename = malloc(n+1);
+      strcpy(qi->filename, arg);
+      queuePush(&sendQueue, qi);
+      ServerFd[0].events |= POLLWRNORM;
+    }
+    else if (strcmp(d, "/sleep") == 0) {
+      if (arg == NULL || strcmp(arg, "") == 0) {
+        printf("Missing time\n");
+        return ;
+      }
+      int len = 0, i;
+      sscanf(arg, "%d", &len);
+      for (i = 0; i < len; i++) {
+        struct timespec req = {1, 0};
+        printf("Sleep %d\n", i+1);
+        nanosleep(&req, NULL);
+      }
     }
   }
 }
@@ -232,6 +342,7 @@ int main(int argc, char *argv[])
   ServerFd[1].events = POLLIN;
   initPacket(&sendServ);
   initPacket(&recvServ);
+  queueInit(&sendQueue);
   printf("Welcome to the dropbox-like server! : %s\n", username);
   while (!serverClosed) {
     int nready = poll(ServerFd, 2, -1);

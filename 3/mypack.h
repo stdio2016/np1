@@ -18,4 +18,6 @@ unsigned getPacketSize(struct MyPack *p);
 int recvPacket(int sock, struct MyPack *buf);
 void setPacketHeader(struct MyPack *p, unsigned type, unsigned size);
 int sendPacket(int sock, struct MyPack *buf);
+
+int packetFinished(struct MyPack *p);
 #endif

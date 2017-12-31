@@ -29,7 +29,7 @@ int recvPacket(int sock, struct MyPack *buf) {
   }
   if (buf->finished < 4) {
     do {
-      n = recv(sock, buf->buf, 4 - buf->finished, MSG_DONTWAIT);
+      n = recv(sock, buf->buf + buf->finished, 4 - buf->finished, MSG_DONTWAIT);
     } while (n < 0 && errno == EINTR) ;
     if (n == 0) return 0;
     if (n < 0) return -1;
@@ -38,9 +38,9 @@ int recvPacket(int sock, struct MyPack *buf) {
   if (buf->finished == 4 && buf->size == 0) {
     buf->size = getPacketSize(buf) + 4;
   }
-  if (buf->size > 0) {
+  if (buf->size > 4) {
     do {
-      n = recv(sock, buf->buf, buf->size - buf->finished, MSG_DONTWAIT);
+      n = recv(sock, buf->buf + buf->finished, buf->size - buf->finished, MSG_DONTWAIT);
     } while (n < 0 && (errno == EINTR) ) ;
     if (n == 0) return 0;
     if (n < 0) return -1;
@@ -71,4 +71,8 @@ int sendPacket(int sock, struct MyPack *buf) {
   if (buf->finished == buf->size) return buf->size;
   errno = EWOULDBLOCK;
   return -1;
+}
+
+int packetFinished(struct MyPack *p) {
+  return p->finished == p->size;
 }

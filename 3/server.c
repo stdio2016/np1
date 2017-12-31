@@ -14,6 +14,14 @@
 #include <unistd.h> // STDIN_FILENO
 #include <fcntl.h>
 #include "mypack.h"
+#include "queue.h"
+
+#define NAME ('N'<<8|'M')
+#define PUT  ('P'<<8|'U')
+#define DATA ('D'<<8|'A')
+#define CHECK ('C'<<8|'H')
+#define OK   ('O'<<8|'K')
+#define ERROR ('E'<<8|'R')
 
 // define backlog
 #define LISTENQ 5
@@ -35,12 +43,25 @@ union good_sockaddr {
   struct sockaddr_in in;
 };
 
+struct QueueItem {
+  int fileId;
+  char *filename;
+};
+
+enum SendState {
+  STARTING, SENDING, CHECKING
+};
+
 // store client info
 struct client_info {
   char name[256];
   union good_sockaddr addr; // store client's IP and port
   struct MyPack recv; // buffer for client message
   struct MyPack send; // buffer for server -> client
+  struct Queue sendQueue;
+  FILE *fileToSend;
+  FILE *fileToRecv;
+  int isSending;
   int closed;
 } *Clients;
 struct pollfd *ClientFd;
@@ -101,10 +122,10 @@ void destroyClient(int clientId) {
   ClientFd[clientId].fd = -1;
 }
 
-void sendToClient(int clientId, const unsigned char *msg) {
+void sendToClient(int clientId) {
   struct MyPack *b = &Clients[clientId].send;
   int n = 0;
-  n = sendPacket(clientId, b);
+  n = sendPacket(ClientFd[clientId].fd, b);
   if (n > 0) return; // hooray!
   if (n == 0) { // connection closed
     Clients[clientId].closed = 1;
@@ -116,6 +137,7 @@ void sendToClient(int clientId, const unsigned char *msg) {
       ;
     }
     else { // error or connection closed
+      printf("send to client %d error %d\n", clientId, errno);
       Clients[clientId].closed = 1;
       return ;
     }
@@ -154,7 +176,64 @@ void trySendToClientAgain(int clientId) {
 }
 
 void processMessage(int clientId, struct MyPack *msg) {
+  int y = getPacketType(msg);
+  printf("type %c%c\n", y>>8&0xff,y&0xff);
+  if (y == CHECK) {
+    setPacketHeader(&Clients[clientId].send, OK, 0);
+    sendToClient(clientId);
+  }
+  if (y == DATA) {
+    fwrite(msg->buf+4, 1, getPacketSize(msg), stdout);
+    puts("");
+  }
+}
 
+void sendQueuedData(int clientId) {
+  struct MyPack *p = &Clients[clientId].send;
+  struct QueueItem *qi = queueFirst(&Clients[clientId].sendQueue);
+  if (Clients[clientId].isSending == SENDING) {
+    int big = 65535;
+    int y = fread(p->buf+4, 1, big, Clients[clientId].fileToSend);
+    if (y == 0) {
+      setPacketHeader(p, CHECK, 0);
+      sendToClient(clientId);
+      Clients[clientId].isSending = CHECKING;
+      ClientFd[clientId].events &= ~POLLWRNORM;
+    }
+    else if (y < 0) {
+      printf("error reading file '%s'!\n", qi->filename);
+      Clients[clientId].isSending = STARTING;
+    }
+    else {
+      setPacketHeader(p, DATA, y);
+      sendToClient(clientId);
+    }
+  }
+  else if (Clients[clientId].isSending == STARTING) {
+    char numstr[25];
+    sprintf(numstr, "%d", qi->fileId);
+    Clients[clientId].fileToSend = fopen(numstr, "rb");
+    if (Clients[clientId].fileToSend == NULL) {
+      printf("error opening file '%s'!\n", qi->filename);
+      Clients[clientId].isSending = STARTING;
+    }
+    else {
+      int n = strlen(qi->filename);
+      setPacketHeader(p, PUT, n);
+      memcpy(p->buf+4, qi->filename, n);
+      sendToClient(clientId);
+      Clients[clientId].isSending = SENDING;
+    }
+  }
+  else if (Clients[clientId].isSending == CHECKING) {
+    ClientFd[clientId].events &= ~POLLWRNORM;
+  }
+  if (Clients[clientId].isSending == STARTING) {
+    queuePop(&Clients[clientId].sendQueue);
+    if (Clients[clientId].sendQueue.size == 0) {
+      ClientFd[clientId].events &= ~POLLWRNORM;
+    }
+  }
 }
 
 void processClient(int clientId, int socketId) {
@@ -181,7 +260,12 @@ void processClient(int clientId, int socketId) {
     }
   }
   if (!Clients[clientId].closed && (ClientFd[clientId].revents & POLLWRNORM)) {
-    trySendToClientAgain(clientId);
+    if (packetFinished(&Clients[clientId].send)) {
+      sendQueuedData(clientId);
+    }
+    else {
+      trySendToClientAgain(clientId);
+    }
   }
   if (Clients[clientId].closed) {
     printf("client %d closed connection\n", clientId);
