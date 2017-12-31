@@ -13,7 +13,7 @@
 #include <poll.h> // poll(), struct pollfd
 #include <unistd.h> // STDIN_FILENO
 #include <fcntl.h>
-#include "mybuff.h"
+#include "mypack.h"
 
 // define backlog
 #define LISTENQ 5
@@ -39,8 +39,8 @@ union good_sockaddr {
 struct client_info {
   char name[256];
   union good_sockaddr addr; // store client's IP and port
-  struct mybuff recv; // buffer for client message
-  struct mybuff send; // buffer for server -> client
+  struct MyPack recv; // buffer for client message
+  struct MyPack send; // buffer for server -> client
   int closed;
 } *Clients;
 struct pollfd *ClientFd;
@@ -93,8 +93,8 @@ void initClient(int clientId, union good_sockaddr addr) {
   strcpy(Clients[clientId].name, "anonymous");
   Clients[clientId].addr = addr;
   Clients[clientId].closed = 0;
-  initBuffer(&Clients[clientId].recv);
-  initBuffer(&Clients[clientId].send);
+  initPacket(&Clients[clientId].recv);
+  initPacket(&Clients[clientId].send);
 }
 
 void destroyClient(int clientId) {
@@ -102,13 +102,10 @@ void destroyClient(int clientId) {
 }
 
 void sendToClient(int clientId, const unsigned char *msg) {
-  struct mybuff *b = &Clients[clientId].send;
+  struct MyPack *b = &Clients[clientId].send;
   int n = 0;
-  int size = msg[2] << 8 | msg[3];
-  do {
-    n = send(ClientFd[clientId].fd, msg, size, MSG_DONTWAIT);
-  } while (n < 0 && errno == EINTR) ;
-  if (n == size) return; // hooray!
+  n = sendPacket(clientId, b);
+  if (n > 0) return; // hooray!
   if (n == 0) { // connection closed
     Clients[clientId].closed = 1;
     return ;
@@ -123,10 +120,6 @@ void sendToClient(int clientId, const unsigned char *msg) {
       return ;
     }
   }
-  // not all are sent
-  // ready to send
-  b->finished = n;
-  b->size = size;
   ClientFd[clientId].events |= POLLWRNORM;
 }
 
@@ -160,34 +153,7 @@ void trySendToClientAgain(int clientId) {
   }
 }
 
-void sendNameToClient(int clientId, const char *name) {
-#ifdef BETTER_PRINT
-  sendToClient(clientId, "\x1B[92m");
-#endif
-  sendToClient(clientId, name);
-#ifdef BETTER_PRINT
-  sendToClient(clientId, "\x1B[0m");
-#endif
-}
-
-void sendMessageToClient(int clientId, unsigned char *msg) {
-#ifdef BETTER_PRINT
-  sendToClient(clientId, "\x1B[93m");
-#endif
-  // replace all control chars with space
-  int i;
-  for (i = 0; msg[i]; i++) {
-    if (msg[i] < ' ' && msg[i] != '\t' || msg[i] == '\x7F') {
-      msg[i] = ' ';
-    }
-  }
-  sendToClient(clientId, msg);
-#ifdef BETTER_PRINT
-  sendToClient(clientId, "\x1B[0m");
-#endif
-}
-
-void processMessage(int clientId, char *msg) {
+void processMessage(int clientId, struct MyPack *msg) {
 
 }
 
@@ -213,7 +179,7 @@ void processClient(int clientId, int socketId) {
       Clients[clientId].closed = 1;
     }
     else {
-      processMessage(clientId, Clients[clientId].recv.buf);
+      processMessage(clientId, &Clients[clientId].recv);
     }
   }
   if (!Clients[clientId].closed && (ClientFd[clientId].revents & POLLWRNORM)) {
