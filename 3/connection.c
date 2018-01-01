@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,22 @@ void getSaferName(char *name) {
   if (j > 0) {
     memmove(name, &name[j], i-j+1);
   }
+}
+
+void seti64(unsigned char *loc, int64_t num) {
+  unsigned int i;
+  for (i = 0; i < 8; i++) {
+    loc[i] = num>>((7-i)*8) & 0xFF;
+  }
+}
+
+int64_t geti64(unsigned char *loc) {
+  unsigned int i;
+  int64_t n = 0;
+  for (i = 0; i < 8; i++) {
+    n = n << 8 | (int64_t)loc[i];
+  }
+  return n;
 }
 
 char itoaBuf[25];
@@ -186,6 +203,13 @@ void processMessage(int clientId, struct MyPack *msg) {
     if (me->fileToRecv == NULL) return ;
     if (isServer)
       printf("Client %d (%s) uploaded %s\n", clientId,  me->name , me->recvFilename);
+    else {
+      printf("\x1B[A\x1B[GProgress : [");
+      int i;
+      for (i = 0; i < 32; i++) putchar('#');
+      printf("]\n");
+      printf("Download %s complete!\n", me->recvFilename);
+    }
     ClientFd[clientId].events |= POLLWRNORM;
     int ok = 1;
     if (ok) {
@@ -201,19 +225,31 @@ void processMessage(int clientId, struct MyPack *msg) {
   }
   else if (y == DATA) {
     if (me->fileToRecv == NULL) return ;
-    fwrite(msg->buf+4, 1, getPacketSize(msg), me->fileToRecv);
+    int n = getPacketSize(msg);
+    fwrite(msg->buf+4, 1, n, me->fileToRecv);
+    if (!isServer) {
+      printf("\x1B[A\x1B[GProgress : [");
+      float pa = me->recvFilesize;
+      pa = ftello(me->fileToRecv) / pa * 30;
+      int i;
+      for (i = 0; i < pa && i < 30; i++) putchar('#');
+      for (; i < 32; i++) putchar(' ');
+      printf("]\n"); fflush(stdout);
+    }
   }
   else if (y == PUT) {
+    int n = getPacketSize(msg);
+    if (n <= 8) return;
     if (me->isRecving != RecvState_NONE) {
       deleteReceived(me);
     }
-    int n = getPacketSize(msg);
-    if (n > 255) {
-      n = 255;
+    if (n > 255+8) {
+      n = 255+8;
     }
-    memcpy(me->recvFilename, msg->buf+4, n);
+    memcpy(me->recvFilename, msg->buf+12, n-8);
     me->recvFilename[n] = '\0';
     getSaferName(me->recvFilename);
+    me->recvFilesize = geti64(msg->buf+4);
     me->isRecving = RecvState_RECEIVING;
     me->recvFileId = ++fileId;
     if (isServer) {
@@ -222,7 +258,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       me->saveFileId = fileId;
     }
     else {
-      printf("Downloading file : %s\n", me->recvFilename);
+      printf("Downloading file : %s\n\n", me->recvFilename);
     }
     me->fileToRecv = fopen(myitoa(me->recvFileId), "wb");
   }
@@ -325,9 +361,9 @@ void sendQueuedData(int clientId) {
       if (!isServer) {
         printf("\x1B[A\x1B[GProgress : [");
         float pa = me->sendFilesize;
-        pa = ftell(me->fileToSend) / pa * 30;
+        pa = ftello(me->fileToSend) / pa * 30;
         int i;
-        for (i = 0; i < pa; i++) putchar('#');
+        for (i = 0; i < pa && i < 30; i++) putchar('#');
         for (; i < 32; i++) putchar(' ');
         printf("]\n"); fflush(stdout);
       }
@@ -352,14 +388,15 @@ void sendQueuedData(int clientId) {
       }
       else {
         if (me->isSending != SendState_RESEND)
-        printf("Uploading file : %s\n", qi->filename);
-        fseek(me->fileToSend, 0, SEEK_END);
-        me->sendFilesize = ftell(me->fileToSend);
-        rewind(me->fileToSend);
+        printf("Uploading file : %s\n\n", qi->filename);
       }
+      fseeko(me->fileToSend, 0, SEEK_END);
+      me->sendFilesize = ftello(me->fileToSend);
+      rewind(me->fileToSend);
       int n = strlen(qi->filename);
-      setPacketHeader(p, PUT, n);
-      memcpy(p->buf+4, qi->filename, n);
+      setPacketHeader(p, PUT, n+8);
+      seti64(p->buf+4, me->sendFilesize);
+      memcpy(p->buf+12, qi->filename, n);
       sendToClient(clientId);
       me->isSending = SendState_SENDING;
       ClientFd[clientId].events |= POLLWRNORM;

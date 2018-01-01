@@ -44,7 +44,8 @@ struct client_info {
   struct Queue sendQueue;
   FILE *fileToSend;
   FILE *fileToRecv;
-  long sendFilesize;
+  off_t sendFilesize;
+  off_t recvFilesize;
   enum SendState isSending;
   enum RecvState isRecving;
   int closed;
