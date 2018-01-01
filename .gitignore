@@ -2,3 +2,8 @@
 *.zip
 client
 server
+
+# client download temp files
+*.tmp
+# server data
+*.dat

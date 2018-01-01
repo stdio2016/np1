@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include "queue.h"
 #include "mypack.h"
+#include "MyHash.h"
 
 #define NAME ('N'<<8|'M')
 #define PUT  ('P'<<8|'U')
@@ -36,6 +37,7 @@ struct QueueItem {
 // store client info
 struct client_info {
   char name[256];
+  int userId;
   union good_sockaddr addr; // store client's IP and port
   struct MyPack recv; // buffer for client message
   struct MyPack send; // buffer for server -> client
@@ -47,14 +49,30 @@ struct client_info {
   enum RecvState isRecving;
   int closed;
   char recvFilename[256];
-  int recvFileId;
+  int recvFileId; // temporary file number
+  int saveFileId; // server only file number
 } *Clients;
 struct pollfd *ClientFd;
 int fileId;
+
+struct FileEntry {
+  char filename[256];
+  int fileId;
+};
+
+struct UserEntry{
+  char name[256];
+  int id;
+  struct MyHash files;
+};
+
+extern struct MyHash users; // name -> UserEntry
 
 void initClient(int clientId, union good_sockaddr addr);
 void processClient(int clientId, int socketId);
 void destroyClient(int clientId);
 void sendToClient(int clientId);
+
+void initUserTable();
 
 #endif

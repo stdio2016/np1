@@ -15,11 +15,13 @@ void queueDestroy(struct Queue *q) {
 
 void queuePush(struct Queue *q, void *item) {
   if (q->size >= q->capacity) {
-    void **n = malloc(sizeof(void*) * q->capacity * 2);
+    void **n = realloc(q->data, sizeof(void*) * q->capacity * 2);
     if (n == NULL) return;
     q->data = n;
-    memcpy(n + q->capacity+q->start, n + q->start, (q->capacity - q->start) * sizeof(void *));
-    q->start += q->capacity;
+    size_t end = q->start + q->size - q->capacity, i;
+    for (i = 0; i < end; i++) {
+      q->data[i + q->capacity] = q->data[i];
+    }
     q->capacity *= 2;
   }
   size_t end = q->start + q->size;

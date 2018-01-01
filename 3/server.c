@@ -93,6 +93,7 @@ int main(int argc, char *argv[])
   }
   Clients = malloc(sizeof(struct client_info) * open_max);
   if (Clients == NULL) OutOfMemory();
+  initUserTable();
   signal(SIGPIPE, SIG_IGN);
   while (88487) { // an infinite loop
     int nready = poll(ClientFd, maxi+1, SOME_TIME);

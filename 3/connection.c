@@ -4,10 +4,14 @@
 #include <string.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #include "connection.h"
 #include "MyHash.h"
 
 int fileId = 0;
+int userId = 0;
+
+struct MyHash users;
 
 void getSaferName(char *name) {
   size_t i, j = 0;
@@ -23,12 +27,48 @@ void getSaferName(char *name) {
 
 char itoaBuf[25];
 char *myitoa(int num) {
-  sprintf(itoaBuf, "%d", num);
+  if (isServer)
+    sprintf(itoaBuf, "%d.dat", num);
+  else
+    sprintf(itoaBuf, "%d.tmp", num);
   return itoaBuf;
+}
+
+void initUserTable() {
+  MyHash_init(&users, MyHash_strcmp, MyHash_strhash);
+}
+
+int getUserId(char name[]) {
+  struct UserEntry *ue = MyHash_get(&users, name);
+  if (ue == NULL) {
+    ue = malloc(sizeof(*ue));
+    strcpy(ue->name, name);
+    ue->id = ++userId;
+    MyHash_init(&ue->files, MyHash_strcmp, MyHash_strhash);
+    MyHash_set(&users, ue->name, ue);
+  }
+  return ue->id;
+}
+
+int getFileId(char username[], char filename[]) {
+  struct UserEntry *ue = MyHash_get(&users, username);
+  if (ue == NULL) { // should not happen
+    printf("getFileId: user does not exist\n");
+    return 0;
+  }
+  struct FileEntry *fe = MyHash_get(&ue->files, filename);
+  if (fe == NULL) {
+    fe = malloc(sizeof(*fe));
+    strcpy(fe->filename, filename);
+    fe->fileId = ++fileId;
+    MyHash_set(&ue->files, fe->filename, fe);
+  }
+  return fe->fileId;
 }
 
 void initClient(int clientId, union good_sockaddr addr) {
   strcpy(Clients[clientId].name, "");
+  Clients[clientId].userId = 0;
   Clients[clientId].addr = addr;
   Clients[clientId].closed = 0;
   Clients[clientId].fileToRecv = NULL;
@@ -46,6 +86,26 @@ void deleteReceived(struct client_info *me) {
   fclose(me->fileToRecv);
   me->fileToRecv = NULL;
   remove(myitoa(me->recvFileId));
+}
+
+void renameReceived(struct client_info *me) {
+  int yn;
+  if (isServer) {
+    char ff[25];
+    strcpy(ff, myitoa(me->saveFileId));
+    yn = remove(ff);
+    yn = rename(myitoa(me->recvFileId), ff);
+    if (yn != 0) {
+      printf("Unable to rename temp file '%s' to '%s'\n", myitoa(me->recvFileId), ff);
+    }
+  }
+  else {
+    yn = remove(me->recvFilename);
+    yn = rename(myitoa(me->recvFileId), me->recvFilename);
+    if (yn != 0) {
+      printf("Unable to save file '%s'\n", me->recvFilename);
+    }
+  }
 }
 
 void destroyClient(int clientId) {
@@ -123,6 +183,7 @@ void processMessage(int clientId, struct MyPack *msg) {
   struct client_info *me = &Clients[clientId];
   int y = getPacketType(msg);
   if (y == CHECK) {
+    if (me->fileToRecv == NULL) return ;
     if (isServer)
       printf("Client %d (%s) uploaded %s\n", clientId,  me->name , me->recvFilename);
     ClientFd[clientId].events |= POLLWRNORM;
@@ -131,6 +192,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       me->isRecving = RecvState_OK;
       fclose(me->fileToRecv);
       me->fileToRecv = NULL;
+      renameReceived(me);
     }
     else {
       me->isRecving = RecvState_ERROR;
@@ -153,27 +215,43 @@ void processMessage(int clientId, struct MyPack *msg) {
     me->recvFilename[n] = '\0';
     getSaferName(me->recvFilename);
     me->isRecving = RecvState_RECEIVING;
+    me->recvFileId = ++fileId;
     if (isServer) {
-      printf("Client %d uploads '%s'\n", clientId, me->recvFilename);
+      int fileId = getFileId(me->name, me->recvFilename);
+      printf("Client %d uploads '%s' (file id=%d)\n", clientId, me->recvFilename, fileId);
+      me->saveFileId = fileId;
     }
     else {
-      printf("Uploading file : %s\n", me->recvFilename);
+      printf("Downloading file : %s\n", me->recvFilename);
     }
-    me->recvFileId = fileId++;
     me->fileToRecv = fopen(myitoa(me->recvFileId), "wb");
   }
   else if (y == NAME) {
-    if (me->name[0] != '\0') return ; // already have name
+    if (me->name[0] != '\0' || !isServer) return ; // already have name
     int n = getPacketSize(msg);
     if (n > 255) {
       n = 255;
     }
     memcpy(me->name, msg->buf+4, n);
     me->name[n] = '\0';
-    if (isServer)
-      printf("Client %d is now known as %s\n", clientId, me->name);
+    me->userId = getUserId(me->name);
+    printf("Client %d is now known as %s (uid=%d)\n", clientId, me->name, me->userId);
+    // send files to client
+    struct MyHashIterator it;
+    struct UserEntry *ue = MyHash_get(&users, me->name);
+    MyHash_iterate(&ue->files, &it);
+    while (it.it != NULL) {
+      int n = strlen(it.it->key);
+      struct QueueItem *qi = calloc(1, sizeof(*qi));
+      qi->filename = malloc(n+1);
+      qi->fileId = ((struct FileEntry *)(it.it->value))->fileId;
+      strcpy(qi->filename, it.it->key);
+      queuePush(&me->sendQueue, qi);
+      MyHash_next(&it);
+      ClientFd[clientId].events |= POLLWRNORM;
+    }
   }
-  if (y == OK) {
+  else if (y == OK) {
     if (me->isSending == SendState_CHECKING) {
       struct QueueItem *qi = queueFirst(&me->sendQueue);
       int i;
@@ -196,7 +274,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       }
     }
   }
-  if (y == ERROR) {
+  else if (y == ERROR) {
     if (me->isSending == SendState_CHECKING) {
       struct QueueItem *qi = queueFirst(&me->sendQueue);
       fclose(me->fileToSend);
@@ -336,7 +414,7 @@ void processClient(int clientId, int socketId) {
     if (isServer)
       printf("client %d closed connection\n", clientId);
     shutdown(socketId, SHUT_RDWR);
+    close(socketId);
     destroyClient(clientId);
   }
 }
-
