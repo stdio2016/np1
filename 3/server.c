@@ -1,4 +1,3 @@
-#include <ctype.h>
 #include <errno.h>
 #include <limits.h> // for OPEN_MAX
 #include <signal.h>
@@ -13,15 +12,8 @@
 #include <poll.h> // poll(), struct pollfd
 #include <unistd.h> // STDIN_FILENO
 #include <fcntl.h>
-#include "mypack.h"
-#include "queue.h"
-
-#define NAME ('N'<<8|'M')
-#define PUT  ('P'<<8|'U')
-#define DATA ('D'<<8|'A')
-#define CHECK ('C'<<8|'H')
-#define OK   ('O'<<8|'K')
-#define ERROR ('E'<<8|'R')
+#include "connection.h"
+int isServer = 1;
 
 // define backlog
 #define LISTENQ 5
@@ -38,34 +30,6 @@ int open_max; // maximum file descriptor id
 #define ERROR_HEAD  SERVER_HEAD "ERROR: "
 #define SUCCESS_HEAD  SERVER_HEAD "SUCCESS: "
 
-union good_sockaddr {
-  struct sockaddr sa;
-  struct sockaddr_in in;
-};
-
-struct QueueItem {
-  int fileId;
-  char *filename;
-};
-
-enum SendState {
-  STARTING, SENDING, CHECKING
-};
-
-// store client info
-struct client_info {
-  char name[256];
-  union good_sockaddr addr; // store client's IP and port
-  struct MyPack recv; // buffer for client message
-  struct MyPack send; // buffer for server -> client
-  struct Queue sendQueue;
-  FILE *fileToSend;
-  FILE *fileToRecv;
-  int isSending;
-  int closed;
-  char recvFilename[256];
-} *Clients;
-struct pollfd *ClientFd;
 // all connected clients
 int maxi = 1;
 
@@ -109,179 +73,6 @@ void initServer(char *portStr) {
 
   int flag=fcntl(sockfd,F_GETFL,0);
   fcntl(sockfd,F_SETFL,flag|O_NONBLOCK);
-}
-
-void initClient(int clientId, union good_sockaddr addr) {
-  strcpy(Clients[clientId].name, "");
-  Clients[clientId].addr = addr;
-  Clients[clientId].closed = 0;
-  initPacket(&Clients[clientId].recv);
-  initPacket(&Clients[clientId].send);
-}
-
-void destroyClient(int clientId) {
-  ClientFd[clientId].fd = -1;
-}
-
-void sendToClient(int clientId) {
-  struct MyPack *b = &Clients[clientId].send;
-  int n = 0;
-  n = sendPacket(ClientFd[clientId].fd, b);
-  if (n > 0) return; // hooray!
-  if (n == 0) { // connection closed
-    Clients[clientId].closed = 1;
-    return ;
-  }
-  if (n < 0) {
-    n = 0;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      ;
-    }
-    else { // error or connection closed
-      printf("send to client %d error %d\n", clientId, errno);
-      Clients[clientId].closed = 1;
-      return ;
-    }
-  }
-  ClientFd[clientId].events |= POLLWRNORM;
-}
-
-void trySendToClientAgain(int clientId) {
-  int all = Clients[clientId].send.size;
-  int finished = Clients[clientId].send.finished;
-  char *msg = &Clients[clientId].send.buf[finished];
-  int n;
-  do {
-    n = send(ClientFd[clientId].fd, msg, all - finished, MSG_DONTWAIT);
-  } while (n < 0 && errno == EINTR) ;
-  if (n == 0) { // connection closed, I give up
-    Clients[clientId].closed = 1;
-    ClientFd[clientId].events &= ~POLLWRNORM;
-    return ;
-  }
-  else if (n < 0) {
-    if (errno != EAGAIN && errno != EWOULDBLOCK) { // some error that I don't know
-      Clients[clientId].closed = 1;
-      ClientFd[clientId].events &= ~POLLWRNORM;
-      return ;
-    }
-  }
-  else {
-    Clients[clientId].send.finished += n;
-    if (Clients[clientId].send.finished == all) { // completed
-      Clients[clientId].send.finished = 0;
-      Clients[clientId].send.size = 0;
-      ClientFd[clientId].events &= ~POLLWRNORM;
-    }
-  }
-}
-
-void processMessage(int clientId, struct MyPack *msg) {
-  int y = getPacketType(msg);
-  if (y == CHECK) {
-    printf("Client %d (%s) uploaded %s\n", clientId,  Clients[clientId].name , Clients[clientId].recvFilename);
-    setPacketHeader(&Clients[clientId].send, OK, 0);
-    sendToClient(clientId);
-  }
-  else if (y == DATA) {
-    ;
-  }
-  else if (y == NAME) {
-    if (Clients[clientId].name[0] != '\0') return ; // already have name
-    int n = getPacketSize(msg);
-    if (n > 255) {
-      n = 255;
-    }
-    memcpy(Clients[clientId].name, msg->buf+4, n);
-    Clients[clientId].name[n] = '\0';
-    printf("Client %d is now known as %s\n", clientId, Clients[clientId].name);
-  }
-}
-
-void sendQueuedData(int clientId) {
-  struct MyPack *p = &Clients[clientId].send;
-  struct QueueItem *qi = queueFirst(&Clients[clientId].sendQueue);
-  if (Clients[clientId].isSending == SENDING) {
-    int big = 1000;
-    int y = fread(p->buf+4, 1, big, Clients[clientId].fileToSend);
-    if (y == 0) {
-      setPacketHeader(p, CHECK, 0);
-      sendToClient(clientId);
-      Clients[clientId].isSending = CHECKING;
-      ClientFd[clientId].events &= ~POLLWRNORM;
-    }
-    else if (y < 0) {
-      printf("error reading file '%s'!\n", qi->filename);
-      Clients[clientId].isSending = STARTING;
-    }
-    else {
-      setPacketHeader(p, DATA, y);
-      sendToClient(clientId);
-    }
-  }
-  else if (Clients[clientId].isSending == STARTING) {
-    char numstr[25];
-    sprintf(numstr, "%d", qi->fileId);
-    Clients[clientId].fileToSend = fopen(numstr, "rb");
-    if (Clients[clientId].fileToSend == NULL) {
-      printf("error opening file '%s'!\n", qi->filename);
-      Clients[clientId].isSending = STARTING;
-    }
-    else {
-      int n = strlen(qi->filename);
-      setPacketHeader(p, PUT, n);
-      memcpy(p->buf+4, qi->filename, n);
-      sendToClient(clientId);
-      Clients[clientId].isSending = SENDING;
-    }
-  }
-  else if (Clients[clientId].isSending == CHECKING) {
-    ClientFd[clientId].events &= ~POLLWRNORM;
-  }
-  if (Clients[clientId].isSending == STARTING) {
-    queuePop(&Clients[clientId].sendQueue);
-    if (Clients[clientId].sendQueue.size == 0) {
-      ClientFd[clientId].events &= ~POLLWRNORM;
-    }
-  }
-}
-
-void processClient(int clientId, int socketId) {
-  // socketId is socket of client #clientId
-  if (!Clients[clientId].closed) {
-    int n = recvPacket(socketId, &Clients[clientId].recv);
-    if (n < 0) {
-      if (errno == ECONNRESET || errno == EPIPE) {
-        Clients[clientId].closed = 1;
-      }
-      else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        ; // not finished
-      }
-      else {
-        printf("recvPacket error\n");
-        Clients[clientId].closed = 1;
-      }
-    }
-    else if (n == 0) {
-      Clients[clientId].closed = 1;
-    }
-    else {
-      processMessage(clientId, &Clients[clientId].recv);
-    }
-  }
-  if (!Clients[clientId].closed && (ClientFd[clientId].revents & POLLWRNORM)) {
-    if (packetFinished(&Clients[clientId].send)) {
-      sendQueuedData(clientId);
-    }
-    else {
-      trySendToClientAgain(clientId);
-    }
-  }
-  if (Clients[clientId].closed) {
-    printf("client %d closed connection\n", clientId);
-    close(socketId);
-    destroyClient(clientId);
-  }
 }
 
 int main(int argc, char *argv[])
