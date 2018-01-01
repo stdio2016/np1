@@ -499,7 +499,7 @@ int main(int argc, char *argv[])
   Clients = malloc(sizeof(struct client_info) * open_max);
   if (Clients == NULL) OutOfMemory();
   signal(SIGPIPE, SIG_IGN);
-  while (88487) {
+  while (88487) { // an infinite loop
     int nready = poll(ClientFd, maxi+1, SOME_TIME);
     if (nready < 0) {
       if (errno == EINTR) continue;
@@ -515,6 +515,9 @@ int main(int argc, char *argv[])
       fgets(buf, 100, stdin);
       for (i = 0; buf[i] && buf[i] != '\n'; i++) {
         buf[i] ^= 0x20;
+      }
+      if (f == 1) {
+        break; // shutdown the server
       }
       if (f <= maxi && f > 1 && ClientFd[f].fd > 0) {
         sendToClient(f, buf);
@@ -565,6 +568,13 @@ int main(int argc, char *argv[])
         if (--nready <= 0)
           break;
       }
+    }
+  }
+  for (i = 2; i <= maxi; i++) {
+    if (ClientFd[i].fd >= 0) {
+      close(ClientFd[i].fd);
+      destroyClient(i);
+      ClientFd[i].fd = -1;
     }
   }
   free(ClientFd);
