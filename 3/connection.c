@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
@@ -83,6 +84,7 @@ void trySendToClientAgain(int clientId) {
 }
 
 void processMessage(int clientId, struct MyPack *msg) {
+  struct client_info *me = &Clients[clientId];
   int y = getPacketType(msg);
   if (y == CHECK) {
     if (isServer)
@@ -115,6 +117,33 @@ void processMessage(int clientId, struct MyPack *msg) {
     if (isServer)
       printf("Client %d is now known as %s\n", clientId, Clients[clientId].name);
   }
+  if (y == OK) {
+    if (me->isSending == SendState_CHECKING) {
+      struct QueueItem *qi = queueFirst(&me->sendQueue);
+      int i;
+      if (isServer) {
+        printf("Client %d received %s\n", clientId, qi->filename);
+      }
+      else {
+        printf("\rProgress : [");
+        for (i = 0; i < 32; i++) putchar('#');
+        printf("]\n");
+        printf("Upload %s complete!\n", qi->filename);
+      }
+      free(qi);
+      fclose(me->fileToSend);
+      queuePop(&me->sendQueue);
+      me->isSending = SendState_STARTING;
+    }
+  }
+  if (y == ERROR) {
+    if (me->isSending == SendState_CHECKING) {
+      struct QueueItem *qi = queueFirst(&me->sendQueue);
+      fclose(me->fileToSend);
+      me->isSending = SendState_STARTING;
+      ClientFd[0].events |= POLLWRNORM;
+    }
+  }
 }
 
 void sendCheckResult(int clientId) {
@@ -132,60 +161,74 @@ void sendCheckResult(int clientId) {
 }
 
 void sendQueuedData(int clientId) {
-  if (Clients[clientId].sendQueue.size == 0) {
-    Clients[clientId].isSending = SendState_NONE;
+  struct client_info *me = &Clients[clientId];
+  if (me->sendQueue.size == 0) {
+    me->isSending = SendState_NONE;
     ClientFd[clientId].events &= ~POLLWRNORM;
     return ;
   }
-  struct MyPack *p = &Clients[clientId].send;
-  struct QueueItem *qi = queueFirst(&Clients[clientId].sendQueue);
-  if (Clients[clientId].isSending == SendState_SENDING) {
+  struct MyPack *p = &me->send;
+  struct QueueItem *qi = queueFirst(&me->sendQueue);
+  if (me->isSending == SendState_SENDING) {
     int big = 1000;
-    int y = fread(p->buf+4, 1, big, Clients[clientId].fileToSend);
+    int y = fread(p->buf+4, 1, big, me->fileToSend);
     if (y == 0) {
       setPacketHeader(p, CHECK, 0);
       sendToClient(clientId);
-      Clients[clientId].isSending = SendState_CHECKING;
+      me->isSending = SendState_CHECKING;
       ClientFd[clientId].events &= ~POLLWRNORM;
     }
     else if (y < 0) {
       printf("error reading file '%s'!\n", qi->filename);
-      Clients[clientId].isSending = SendState_STARTING;
+      me->isSending = SendState_STARTING;
     }
     else {
+      if (!isServer) {
+        printf("\rProgress : [");
+        float pa = qi->filesize;
+        pa = ftell(me->fileToSend) / pa * 30;
+        int i;
+        for (i = 0; i < pa; i++) putchar('#');
+        for (; i < 32; i++) putchar(' ');
+        printf("]"); fflush(stdout);
+      }
       setPacketHeader(p, DATA, y);
       sendToClient(clientId);
     }
   }
-  else if (Clients[clientId].isSending == SendState_STARTING) {
-    char numstr[25];
-    sprintf(numstr, "%d", qi->fileId);
-    Clients[clientId].fileToSend = fopen(numstr, "rb");
-    if (Clients[clientId].fileToSend == NULL) {
-      printf("error opening file '%s'!\n", qi->filename);
-      Clients[clientId].isSending = SendState_STARTING;
+  else if (me->isSending == SendState_STARTING) {
+    if (isServer) {
+      char numstr[25];
+      sprintf(numstr, "%d", qi->fileId);
+      me->fileToSend = fopen(numstr, "rb");
     }
     else {
+      me->fileToSend = fopen(qi->filename, "rb");
+    }
+    if (me->fileToSend == NULL) {
+      printf("error opening file '%s'!\n", qi->filename);
+      me->isSending = SendState_STARTING;
+    }
+    else {
+      printf("Uploading file : %s\n", qi->filename);
+      if (!isServer) {
+        fseek(me->fileToSend, 0, SEEK_END);
+        qi->filesize = ftell(me->fileToSend);
+        rewind(me->fileToSend);
+      }
       int n = strlen(qi->filename);
       setPacketHeader(p, PUT, n);
       memcpy(p->buf+4, qi->filename, n);
       sendToClient(clientId);
-      Clients[clientId].isSending = SendState_SENDING;
+      me->isSending = SendState_SENDING;
+      ClientFd[clientId].events |= POLLWRNORM;
     }
   }
-  else if (Clients[clientId].isSending == SendState_CHECKING) {
+  else if (me->isSending == SendState_CHECKING) {
     ClientFd[clientId].events &= ~POLLWRNORM;
   }
-  else if (Clients[clientId].isSending == SendState_CHECKING) {
-    setPacketHeader(&Clients[clientId].send, OK, 0);
-    sendToClient(clientId);
-  }
-  if (Clients[clientId].isSending == SendState_STARTING) {
-    queuePop(&Clients[clientId].sendQueue);
-    if (Clients[clientId].sendQueue.size == 0) {
-      ClientFd[clientId].events &= ~POLLWRNORM;
-      Clients[clientId].isSending = SendState_NONE;
-    }
+  if (me->isSending == SendState_STARTING) {
+    queuePop(&me->sendQueue);
   }
 }
 
