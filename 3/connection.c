@@ -43,11 +43,9 @@ void initClient(int clientId, union good_sockaddr addr) {
 
 void deleteReceived(struct client_info *me) {
   if (me->fileToRecv == NULL) return;
-  char numstr[25];
-  sprintf(numstr, "%d", me->recvFileId);
   fclose(me->fileToRecv);
   me->fileToRecv = NULL;
-  remove(numstr);
+  remove(myitoa(me->recvFileId));
 }
 
 void destroyClient(int clientId) {
@@ -63,6 +61,7 @@ void destroyClient(int clientId) {
     struct QueueItem *qi = queueFirst(&Clients[clientId].sendQueue);
     free(qi->filename);
     free(qi);
+    queuePop(&Clients[clientId].sendQueue);
   }
   queueDestroy(&Clients[clientId].sendQueue);
 }
@@ -128,7 +127,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       printf("Client %d (%s) uploaded %s\n", clientId,  me->name , me->recvFilename);
     ClientFd[clientId].events |= POLLWRNORM;
     int ok = 1;
-    if (ok == 0) {
+    if (ok) {
       me->isRecving = RecvState_OK;
       fclose(me->fileToRecv);
       me->fileToRecv = NULL;
@@ -182,7 +181,7 @@ void processMessage(int clientId, struct MyPack *msg) {
         printf("Client %d received %s\n", clientId, qi->filename);
       }
       else {
-        printf("\rProgress : [");
+        printf("\x1B[A\x1B[GProgress : [");
         for (i = 0; i < 32; i++) putchar('#');
         printf("]\n");
         printf("Upload %s complete!\n", qi->filename);
@@ -202,7 +201,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       struct QueueItem *qi = queueFirst(&me->sendQueue);
       fclose(me->fileToSend);
       me->fileToSend = NULL;
-      me->isSending = SendState_STARTING;
+      me->isSending = SendState_RESEND;
       ClientFd[0].events |= POLLWRNORM;
     }
   }
@@ -246,23 +245,21 @@ void sendQueuedData(int clientId) {
     }
     else {
       if (!isServer) {
-        printf("\rProgress : [");
+        printf("\x1B[A\x1B[GProgress : [");
         float pa = me->sendFilesize;
         pa = ftell(me->fileToSend) / pa * 30;
         int i;
         for (i = 0; i < pa; i++) putchar('#');
         for (; i < 32; i++) putchar(' ');
-        printf("]"); fflush(stdout);
+        printf("]\n"); fflush(stdout);
       }
       setPacketHeader(p, DATA, y);
       sendToClient(clientId);
     }
   }
-  else if (me->isSending == SendState_STARTING) {
+  else if (me->isSending == SendState_STARTING || me->isSending == SendState_RESEND) {
     if (isServer) {
-      char numstr[25];
-      sprintf(numstr, "%d", qi->fileId);
-      me->fileToSend = fopen(numstr, "rb");
+      me->fileToSend = fopen(myitoa(qi->fileId), "rb");
     }
     else {
       me->fileToSend = fopen(qi->filename, "rb");
@@ -272,8 +269,12 @@ void sendQueuedData(int clientId) {
       me->isSending = SendState_STARTING;
     }
     else {
-      printf("Uploading file : %s\n", qi->filename);
-      if (!isServer) {
+      if (isServer) {
+        printf("Sending file '%s' to client %d\n", qi->filename, clientId);
+      }
+      else {
+        if (me->isSending != SendState_RESEND)
+        printf("Uploading file : %s\n", qi->filename);
         fseek(me->fileToSend, 0, SEEK_END);
         me->sendFilesize = ftell(me->fileToSend);
         rewind(me->fileToSend);

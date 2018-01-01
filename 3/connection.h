@@ -16,7 +16,7 @@
 extern int isServer;
 
 enum SendState {
-  SendState_STARTING, SendState_SENDING, SendState_CHECKING
+  SendState_STARTING, SendState_SENDING, SendState_CHECKING, SendState_RESEND
 };
 
 enum RecvState {
