@@ -12,15 +12,11 @@
 #include <fcntl.h> // fcntl()
 #include "mypack.h"
 #include "queue.h"
+#include "connection.h"
+
+int isServer = 0;
 #define MAXLINE 1000
 #define STDIN_FD 0
-
-#define NAME ('N'<<8|'M')
-#define PUT  ('P'<<8|'U')
-#define DATA ('D'<<8|'A')
-#define CHECK ('C'<<8|'H')
-#define OK   ('O'<<8|'K')
-#define ERROR ('E'<<8|'R')
 
 int sockfd; // socket connected to server
 char buf[MAXLINE]; // user input buffer
@@ -29,24 +25,6 @@ int maxint(int a, int b) {
   return a>b ? a : b;
 }
 
-union good_sockaddr {
-  struct sockaddr sa;
-  struct sockaddr_in in;
-};
-
-struct pollfd ServerFd[2];
-struct MyPack sendServ, recvServ;
-struct Queue sendQueue;
-struct QueueItem {
-  char *filename;
-  long filesize;
-};
-enum SendState {
-  STARTING, SENDING, CHECKING
-} isSending;
-FILE *fileToSend;
-
-int serverClosed = 0;
 char myname[256];
 
 void buildConnection(char *ipStr, char *portStr) {
@@ -100,179 +78,6 @@ void closeConnection(void) {
   shutdown(sockfd, SHUT_RDWR);
 }
 
-
-void sendToServer() {
-  int n = 0;
-  n = sendPacket(sockfd, &sendServ);
-  if (n > 0) return; // hooray!
-  if (n == 0) { // connection closed
-    serverClosed = 1;
-    return ;
-  }
-  if (n < 0) {
-    n = 0;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      ;
-    }
-    else { // error or connection closed
-      printf("send error %d\n", errno);
-      serverClosed = 1;
-      return ;
-    }
-  }
-  ServerFd[0].events |= POLLWRNORM;
-}
-
-void trySendToServerAgain() {
-  int all = sendServ.size;
-  int finished = sendServ.finished;
-  char *msg = &sendServ.buf[finished];
-  int n;
-  do {
-    n = send(sockfd, msg, all - finished, MSG_DONTWAIT);
-  } while (n < 0 && errno == EINTR) ;
-  if (n == 0) { // connection closed, I give up
-    serverClosed = 1;
-    ServerFd[0].events &= ~POLLWRNORM;
-    return ;
-  }
-  else if (n < 0) {
-    if (errno != EAGAIN && errno != EWOULDBLOCK) { // some error that I don't know
-      serverClosed = 1;
-      ServerFd[0].events &= ~POLLWRNORM;
-      return ;
-    }
-  }
-  else {
-    sendServ.finished += n;
-    if (sendServ.finished == all) { // completed
-      sendServ.finished = 0;
-      sendServ.size = 0;
-      ServerFd[0].events &= ~POLLWRNORM;
-    }
-  }
-}
-
-void processMessage() {
-  int y = getPacketType(&recvServ);
-  if (y == OK) {
-    if (isSending == CHECKING) {
-      struct QueueItem *qi = queueFirst(&sendQueue);
-      int i;
-      printf("\rProgress : [");
-      for (i = 0; i < 32; i++) putchar('#');
-      printf("]"); fflush(stdout);
-      printf("\nUpload %s complete!\n", qi->filename);
-      free(qi);
-      queuePop(&sendQueue);
-      isSending = STARTING;
-    }
-  }
-  if (y == ERROR) {
-    if (isSending == CHECKING) {
-      struct QueueItem *qi = queueFirst(&sendQueue);
-      rewind(fileToSend);
-      isSending = SENDING;
-      int n = strlen(qi->filename);
-      setPacketHeader(&sendServ, PUT, n);
-      memcpy(sendServ.buf+4, qi->filename, n);
-      sendToServer();
-      ServerFd[0].events |= POLLWRNORM;
-    }
-  }
-}
-
-void sendQueuedData() {
-  struct QueueItem *qi = queueFirst(&sendQueue);
-  if (isSending == SENDING) {
-    int big = 1000;
-    int y = fread(sendServ.buf+4, 1, big, fileToSend);
-    if (y == 0) {
-      setPacketHeader(&sendServ, CHECK, 0);
-      sendToServer();
-      isSending = CHECKING;
-      ServerFd[0].events &= ~POLLWRNORM;
-    }
-    else if (y < 0) {
-      printf("error reading file '%s'!\n", qi->filename);
-      isSending = STARTING;
-    }
-    else {
-      printf("\rProgress : [");
-      float pa = qi->filesize;
-      pa = ftell(fileToSend) / pa * 30;
-      int i;
-      for (i = 0; i < pa; i++) putchar('#');
-      for (; i < 32; i++) putchar(' ');
-      printf("]"); fflush(stdout);
-      setPacketHeader(&sendServ, DATA, y);
-      sendToServer();
-    }
-  }
-  else if (isSending == STARTING) {
-    fileToSend = fopen(qi->filename, "rb");
-    if (fileToSend == NULL) {
-      printf("error opening file '%s'!\n", qi->filename);
-      isSending = STARTING;
-    }
-    else {
-      printf("Uploading file : %s\n", qi->filename);
-      fseek(fileToSend, 0, SEEK_END);
-      qi->filesize = ftell(fileToSend);
-      rewind(fileToSend);
-      int n = strlen(qi->filename);
-      setPacketHeader(&sendServ, PUT, n);
-      memcpy(sendServ.buf+4, qi->filename, n);
-      sendToServer();
-      isSending = SENDING;
-      ServerFd[0].events |= POLLWRNORM;
-    }
-  }
-  else if (isSending == CHECKING) {
-    ServerFd[0].events &= ~POLLWRNORM;
-  }
-  if (isSending == STARTING) {
-    queuePop(&sendQueue);
-    if (sendQueue.size == 0) {
-      ServerFd[0].events &= ~POLLWRNORM;
-    }
-  }
-}
-
-void processServer() {
-  int still = 1;
-  while (!serverClosed && still) {
-    still = 0;
-    int n = recvPacket(sockfd, &recvServ);
-    if (n < 0) {
-      if (errno == ECONNRESET || errno == EPIPE) {
-        serverClosed = 1;
-      }
-      else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        ; // not finished
-      }
-      else {
-        printf("recvPacket error\n");
-        serverClosed = 1;
-      }
-    }
-    else if (n == 0) {
-      serverClosed = 1;
-    }
-    else {
-      processMessage();
-    }
-  }
-  if (!serverClosed && ((ServerFd[0].revents & POLLWRNORM) || sendQueue.size > 0)) {
-    if (packetFinished(&recvServ)) {
-      sendQueuedData();
-    }
-    else {
-      trySendToServerAgain();
-    }
-  }
-}
-
 char *getArgFromString(char *msg, char **remaining) {
   if (msg == NULL) {
     *remaining = NULL;
@@ -303,7 +108,7 @@ void readUser() {
     char *d = getArgFromString(buf, &arg);
     if (d == NULL) return;
     if (strcmp(d, "/exit") == 0) {
-      serverClosed = 881; // so I can quit
+      Clients[0].closed = 881; // so I can quit
     }
     else if (strcmp(d, "/put") == 0) {
       if (arg == NULL || strcmp(arg, "") == 0) {
@@ -318,8 +123,8 @@ void readUser() {
       struct QueueItem *qi = calloc(1, sizeof(*qi));
       qi->filename = malloc(n+1);
       strcpy(qi->filename, arg);
-      queuePush(&sendQueue, qi);
-      ServerFd[0].events |= POLLWRNORM;
+      queuePush(&Clients[0].sendQueue, qi);
+      ClientFd[0].events |= POLLWRNORM;
     }
     else if (strcmp(d, "/sleep") == 0) {
       if (arg == NULL || strcmp(arg, "") == 0) {
@@ -344,9 +149,9 @@ void sendNameToServer(char *nm) {
     exit(-1);
   }
   strcpy(myname, nm);
-  strcpy(sendServ.buf+4, nm);
-  setPacketHeader(&sendServ, NAME, n);
-  sendToServer();
+  strcpy(Clients[0].send.buf+4, nm);
+  setPacketHeader(&Clients[0].send, NAME, n);
+  sendToClient(0);
 }
 
 int main(int argc, char *argv[])
@@ -359,17 +164,19 @@ int main(int argc, char *argv[])
   }
   buildConnection(argv[1], argv[2]);
   username = argv[3];
-  ServerFd[0].fd = sockfd;
-  ServerFd[0].events = POLLRDNORM;
-  ServerFd[1].fd = 0; // stdin
-  ServerFd[1].events = POLLIN;
-  initPacket(&sendServ);
-  initPacket(&recvServ);
-  queueInit(&sendQueue);
+  Clients = malloc(sizeof(Clients[0]));
+  ClientFd = malloc(sizeof(ClientFd[0]) * 2);
+  ClientFd[0].fd = sockfd;
+  ClientFd[0].events = POLLRDNORM;
+  ClientFd[1].fd = 0; // stdin
+  ClientFd[1].events = POLLIN;
+  initPacket(&Clients[0].send);
+  initPacket(&Clients[0].recv);
+  queueInit(&Clients[0].sendQueue);
   sendNameToServer(argv[3]);
   printf("Welcome to the dropbox-like server! : %s\n", username);
-  while (!serverClosed) {
-    int nready = poll(ServerFd, 2, -1);
+  while (!Clients[0].closed) {
+    int nready = poll(ClientFd, 2, -1);
     if (nready < 0) {
       if (errno == EINTR) continue;
       else {
@@ -377,18 +184,18 @@ int main(int argc, char *argv[])
         exit(3);
       }
     }
-    if (ServerFd[0].revents) {
-      processServer();
+    if (ClientFd[0].revents) {
+      processClient(0, sockfd);
     }
-    if (ServerFd[1].revents) {
+    if (ClientFd[1].revents) {
       readUser();
     }
   }
   closeConnection();
-  if (serverClosed == 1) {
+  if (Clients[0].closed == 1) {
     printf("server closed\n");
   }
-  if (serverClosed == 881) {
+  if (Clients[0].closed == 881) {
     printf("Bye!\n");
   }
   return 0;

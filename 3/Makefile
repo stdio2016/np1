@@ -1,6 +1,6 @@
 all: client server
-client: client.o mypack.o queue.o
-client.o: client.c mypack.h queue.h
+client: client.o mypack.o queue.o connection.o
+client.o: client.c mypack.h queue.h connection.h
 server: server.o mypack.o queue.o connection.o
 server.o: server.c connection.h queue.h mypack.h
 mypack.o: mypack.c mypack.h

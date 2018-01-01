@@ -16,7 +16,7 @@
 extern int isServer;
 
 enum SendState {
-  SendState_NONE, SendState_STARTING, SendState_SENDING, SendState_CHECKING
+  SendState_STARTING, SendState_SENDING, SendState_CHECKING
 };
 
 enum RecvState {
@@ -29,9 +29,16 @@ union good_sockaddr {
 };
 
 struct QueueItem {
-  int fileId;
   char *filename;
-  long filesize;
+  union {
+    struct QueuedItem_ClientSide {
+      long filesize;
+    } cli;
+    struct QueuedItem_ServerSide {
+      int fileId;
+      int readFileId;
+    } ser;
+  };
 };
 
 // store client info
@@ -53,5 +60,6 @@ struct pollfd *ClientFd;
 void initClient(int clientId, union good_sockaddr addr);
 void processClient(int clientId, int socketId);
 void destroyClient(int clientId);
+void sendToClient(int clientId);
 
 #endif

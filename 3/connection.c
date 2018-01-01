@@ -5,6 +5,7 @@
 #include <sys/poll.h>
 #include <sys/socket.h>
 #include "connection.h"
+#include "MyHash.h"
 
 void getSaferName(char *name) {
   size_t i, j = 0;
@@ -134,6 +135,9 @@ void processMessage(int clientId, struct MyPack *msg) {
       fclose(me->fileToSend);
       queuePop(&me->sendQueue);
       me->isSending = SendState_STARTING;
+      if (me->sendQueue.size > 0) { // can send next file
+        ClientFd[clientId].events |= POLLWRNORM;
+      }
     }
   }
   if (y == ERROR) {
@@ -163,7 +167,7 @@ void sendCheckResult(int clientId) {
 void sendQueuedData(int clientId) {
   struct client_info *me = &Clients[clientId];
   if (me->sendQueue.size == 0) {
-    me->isSending = SendState_NONE;
+    me->isSending = SendState_STARTING;
     ClientFd[clientId].events &= ~POLLWRNORM;
     return ;
   }
@@ -185,7 +189,7 @@ void sendQueuedData(int clientId) {
     else {
       if (!isServer) {
         printf("\rProgress : [");
-        float pa = qi->filesize;
+        float pa = qi->cli.filesize;
         pa = ftell(me->fileToSend) / pa * 30;
         int i;
         for (i = 0; i < pa; i++) putchar('#');
@@ -199,7 +203,7 @@ void sendQueuedData(int clientId) {
   else if (me->isSending == SendState_STARTING) {
     if (isServer) {
       char numstr[25];
-      sprintf(numstr, "%d", qi->fileId);
+      sprintf(numstr, "%d", qi->ser.fileId);
       me->fileToSend = fopen(numstr, "rb");
     }
     else {
@@ -213,7 +217,7 @@ void sendQueuedData(int clientId) {
       printf("Uploading file : %s\n", qi->filename);
       if (!isServer) {
         fseek(me->fileToSend, 0, SEEK_END);
-        qi->filesize = ftell(me->fileToSend);
+        qi->cli.filesize = ftell(me->fileToSend);
         rewind(me->fileToSend);
       }
       int n = strlen(qi->filename);
