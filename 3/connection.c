@@ -14,6 +14,13 @@ int userId = 0;
 
 struct MyHash users;
 
+char dupstr(char *str) {
+  size_t n = strlen(str);
+  char *ns = malloc(n+1);
+  memcpy(ns, str, n+1);
+  return ns;
+}
+
 void getSaferName(char *name) {
   size_t i, j = 0;
   for (i = 0; name[i]; i++) {
@@ -302,6 +309,7 @@ void processMessage(int clientId, struct MyPack *msg) {
         printf("]\n");
         printf("Upload %s complete!\n", qi->filename);
       }
+      free(qi->filename);
       free(qi);
       fclose(me->fileToSend);
       me->fileToSend = NULL;
