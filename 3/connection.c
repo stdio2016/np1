@@ -181,6 +181,7 @@ void trySendToClientAgain(int clientId) {
   }
   else if (n < 0) {
     if (errno != EAGAIN && errno != EWOULDBLOCK) { // some error that I don't know
+      printf("send error %d\n", errno);
       Clients[clientId].closed = 1;
       ClientFd[clientId].events &= ~POLLWRNORM;
       return ;
@@ -243,10 +244,11 @@ void processMessage(int clientId, struct MyPack *msg) {
     if (me->isRecving != RecvState_NONE) {
       deleteReceived(me);
     }
-    if (n > 255+8) {
-      n = 255+8;
+    n -= 8;
+    if (n > 255) {
+      n = 255;
     }
-    memcpy(me->recvFilename, msg->buf+12, n-8);
+    memcpy(me->recvFilename, msg->buf+12, n);
     me->recvFilename[n] = '\0';
     getSaferName(me->recvFilename);
     me->recvFilesize = geti64(msg->buf+4);
@@ -319,6 +321,17 @@ void processMessage(int clientId, struct MyPack *msg) {
       ClientFd[0].events |= POLLWRNORM;
     }
   }
+  else if (y == CANCEL) {
+    if (isServer) {
+      printf("Client %d cancelled transmittion\n", clientId);
+    }
+    else {
+      printf("Server cancelled transmittion (Maybe someone is uploading the same file)\n");
+    }
+    if (me->isRecving != RecvState_NONE) {
+      deleteReceived(me);
+    }
+  }
 }
 
 void sendCheckResult(int clientId) {
@@ -337,12 +350,22 @@ void sendCheckResult(int clientId) {
 
 void sendQueuedData(int clientId) {
   struct client_info *me = &Clients[clientId];
+  struct MyPack *p = &me->send;
+  if (me->isSending == SendState_CANCEL) {
+    if (me->fileToSend != NULL) {
+      fclose(me->fileToSend);
+      me->fileToSend = NULL;
+    }
+    setPacketHeader(p, CANCEL, 0);
+    sendToClient(clientId);
+    me->isSending = SendState_STARTING;
+    return ; // queue already popped
+  }
   if (me->sendQueue.size == 0) {
     me->isSending = SendState_STARTING;
     ClientFd[clientId].events &= ~POLLWRNORM;
     return ;
   }
-  struct MyPack *p = &me->send;
   struct QueueItem *qi = queueFirst(&me->sendQueue);
   if (me->isSending == SendState_SENDING) {
     int big = 1000;
@@ -396,7 +419,7 @@ void sendQueuedData(int clientId) {
       int n = strlen(qi->filename);
       setPacketHeader(p, PUT, n+8);
       seti64(p->buf+4, me->sendFilesize);
-      memcpy(p->buf+12, qi->filename, n);
+      memcpy(p->buf+12, qi->filename, n+1);
       sendToClient(clientId);
       me->isSending = SendState_SENDING;
       ClientFd[clientId].events |= POLLWRNORM;
@@ -407,6 +430,8 @@ void sendQueuedData(int clientId) {
   }
   if (me->isSending == SendState_STARTING) {
     queuePop(&me->sendQueue);
+    free(qi->filename);
+    free(qi);
   }
 }
 
@@ -416,13 +441,15 @@ void processClient(int clientId, int socketId) {
     int n = recvPacket(socketId, &Clients[clientId].recv);
     if (n < 0) {
       if (errno == ECONNRESET || errno == EPIPE) {
+        if (isServer)
+          printf("client %d connection reset\n", clientId);
         Clients[clientId].closed = 1;
       }
       else if (errno == EAGAIN || errno == EWOULDBLOCK) {
         ; // not finished
       }
       else {
-        printf("recvPacket error\n");
+        printf("recvPacket error %d\n", errno);
         Clients[clientId].closed = 1;
       }
     }

@@ -49,6 +49,9 @@ int recvPacket(int sock, struct MyPack *buf) {
     errno = EWOULDBLOCK;
     return -1;
   }
+  else if (buf->size == 4) return 4;
+  errno = EWOULDBLOCK;
+  return -1;
 }
 
 void setPacketHeader(struct MyPack *p, unsigned type, unsigned size) {
