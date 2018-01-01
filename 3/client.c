@@ -170,9 +170,8 @@ int main(int argc, char *argv[])
   ClientFd[0].events = POLLRDNORM;
   ClientFd[1].fd = 0; // stdin
   ClientFd[1].events = POLLIN;
-  initPacket(&Clients[0].send);
-  initPacket(&Clients[0].recv);
-  queueInit(&Clients[0].sendQueue);
+  union good_sockaddr unused;
+  initClient(0, unused);
   sendNameToServer(argv[3]);
   printf("Welcome to the dropbox-like server! : %s\n", username);
   while (!Clients[0].closed) {

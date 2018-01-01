@@ -30,15 +30,7 @@ union good_sockaddr {
 
 struct QueueItem {
   char *filename;
-  union {
-    struct QueuedItem_ClientSide {
-      long filesize;
-    } cli;
-    struct QueuedItem_ServerSide {
-      int fileId;
-      int readFileId;
-    } ser;
-  };
+  int fileId;
 };
 
 // store client info
@@ -50,12 +42,15 @@ struct client_info {
   struct Queue sendQueue;
   FILE *fileToSend;
   FILE *fileToRecv;
+  long sendFilesize;
   enum SendState isSending;
   enum RecvState isRecving;
   int closed;
   char recvFilename[256];
+  int recvFileId;
 } *Clients;
 struct pollfd *ClientFd;
+int fileId;
 
 void initClient(int clientId, union good_sockaddr addr);
 void processClient(int clientId, int socketId);

@@ -7,6 +7,8 @@
 #include "connection.h"
 #include "MyHash.h"
 
+int fileId = 0;
+
 void getSaferName(char *name) {
   size_t i, j = 0;
   for (i = 0; name[i]; i++) {
@@ -19,16 +21,50 @@ void getSaferName(char *name) {
   }
 }
 
+char itoaBuf[25];
+char *myitoa(int num) {
+  sprintf(itoaBuf, "%d", num);
+  return itoaBuf;
+}
+
 void initClient(int clientId, union good_sockaddr addr) {
   strcpy(Clients[clientId].name, "");
   Clients[clientId].addr = addr;
   Clients[clientId].closed = 0;
+  Clients[clientId].fileToRecv = NULL;
+  Clients[clientId].fileToSend = NULL;
+  Clients[clientId].isRecving = RecvState_NONE;
+  Clients[clientId].isSending = SendState_STARTING;
+  strcpy(Clients[clientId].recvFilename, "");
+  queueInit(&Clients[clientId].sendQueue);
   initPacket(&Clients[clientId].recv);
   initPacket(&Clients[clientId].send);
 }
 
+void deleteReceived(struct client_info *me) {
+  if (me->fileToRecv == NULL) return;
+  char numstr[25];
+  sprintf(numstr, "%d", me->recvFileId);
+  fclose(me->fileToRecv);
+  me->fileToRecv = NULL;
+  remove(numstr);
+}
+
 void destroyClient(int clientId) {
   ClientFd[clientId].fd = -1;
+  if (Clients[clientId].fileToRecv != NULL) {
+    deleteReceived(&Clients[clientId]);
+  }
+  if (Clients[clientId].fileToSend != NULL) {
+    fclose(Clients[clientId].fileToSend);
+    Clients[clientId].fileToSend = NULL;
+  }
+  while (Clients[clientId].sendQueue.size > 0) {
+    struct QueueItem *qi = queueFirst(&Clients[clientId].sendQueue);
+    free(qi->filename);
+    free(qi);
+  }
+  queueDestroy(&Clients[clientId].sendQueue);
 }
 
 void sendToClient(int clientId) {
@@ -89,34 +125,54 @@ void processMessage(int clientId, struct MyPack *msg) {
   int y = getPacketType(msg);
   if (y == CHECK) {
     if (isServer)
-      printf("Client %d (%s) uploaded %s\n", clientId,  Clients[clientId].name , Clients[clientId].recvFilename);
+      printf("Client %d (%s) uploaded %s\n", clientId,  me->name , me->recvFilename);
     ClientFd[clientId].events |= POLLWRNORM;
-    Clients[clientId].isRecving = RecvState_OK;
+    int ok = 1;
+    if (ok == 0) {
+      me->isRecving = RecvState_OK;
+      fclose(me->fileToRecv);
+      me->fileToRecv = NULL;
+    }
+    else {
+      me->isRecving = RecvState_ERROR;
+      deleteReceived(me);
+    }
   }
   else if (y == DATA) {
-    ;
+    if (me->fileToRecv == NULL) return ;
+    fwrite(msg->buf+4, 1, getPacketSize(msg), me->fileToRecv);
   }
   else if (y == PUT) {
+    if (me->isRecving != RecvState_NONE) {
+      deleteReceived(me);
+    }
     int n = getPacketSize(msg);
     if (n > 255) {
       n = 255;
     }
-    memcpy(Clients[clientId].recvFilename, msg->buf+4, n);
-    Clients[clientId].recvFilename[n] = '\0';
-    getSaferName(Clients[clientId].recvFilename);
-    if (isServer)
-      printf("Client %d uploads '%s'\n", clientId, Clients[clientId].recvFilename);
+    memcpy(me->recvFilename, msg->buf+4, n);
+    me->recvFilename[n] = '\0';
+    getSaferName(me->recvFilename);
+    me->isRecving = RecvState_RECEIVING;
+    if (isServer) {
+      printf("Client %d uploads '%s'\n", clientId, me->recvFilename);
+    }
+    else {
+      printf("Uploading file : %s\n", me->recvFilename);
+    }
+    me->recvFileId = fileId++;
+    me->fileToRecv = fopen(myitoa(me->recvFileId), "wb");
   }
   else if (y == NAME) {
-    if (Clients[clientId].name[0] != '\0') return ; // already have name
+    if (me->name[0] != '\0') return ; // already have name
     int n = getPacketSize(msg);
     if (n > 255) {
       n = 255;
     }
-    memcpy(Clients[clientId].name, msg->buf+4, n);
-    Clients[clientId].name[n] = '\0';
+    memcpy(me->name, msg->buf+4, n);
+    me->name[n] = '\0';
     if (isServer)
-      printf("Client %d is now known as %s\n", clientId, Clients[clientId].name);
+      printf("Client %d is now known as %s\n", clientId, me->name);
   }
   if (y == OK) {
     if (me->isSending == SendState_CHECKING) {
@@ -133,6 +189,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       }
       free(qi);
       fclose(me->fileToSend);
+      me->fileToSend = NULL;
       queuePop(&me->sendQueue);
       me->isSending = SendState_STARTING;
       if (me->sendQueue.size > 0) { // can send next file
@@ -144,6 +201,7 @@ void processMessage(int clientId, struct MyPack *msg) {
     if (me->isSending == SendState_CHECKING) {
       struct QueueItem *qi = queueFirst(&me->sendQueue);
       fclose(me->fileToSend);
+      me->fileToSend = NULL;
       me->isSending = SendState_STARTING;
       ClientFd[0].events |= POLLWRNORM;
     }
@@ -189,7 +247,7 @@ void sendQueuedData(int clientId) {
     else {
       if (!isServer) {
         printf("\rProgress : [");
-        float pa = qi->cli.filesize;
+        float pa = me->sendFilesize;
         pa = ftell(me->fileToSend) / pa * 30;
         int i;
         for (i = 0; i < pa; i++) putchar('#');
@@ -203,7 +261,7 @@ void sendQueuedData(int clientId) {
   else if (me->isSending == SendState_STARTING) {
     if (isServer) {
       char numstr[25];
-      sprintf(numstr, "%d", qi->ser.fileId);
+      sprintf(numstr, "%d", qi->fileId);
       me->fileToSend = fopen(numstr, "rb");
     }
     else {
@@ -217,7 +275,7 @@ void sendQueuedData(int clientId) {
       printf("Uploading file : %s\n", qi->filename);
       if (!isServer) {
         fseek(me->fileToSend, 0, SEEK_END);
-        qi->cli.filesize = ftell(me->fileToSend);
+        me->sendFilesize = ftell(me->fileToSend);
         rewind(me->fileToSend);
       }
       int n = strlen(qi->filename);
