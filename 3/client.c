@@ -133,11 +133,13 @@ void readUser() {
       }
       int len = 0, i;
       sscanf(arg, "%d", &len);
+      printf("Client starts to sleep\n");
       for (i = 0; i < len; i++) {
         struct timespec req = {1, 0};
         printf("Sleep %d\n", i+1);
         nanosleep(&req, NULL);
       }
+      puts("Client wakes up\n");
     }
     else if (strcmp(d, "/cancel") == 0) {
       if (Clients[0].sendQueue.size == 0) {
