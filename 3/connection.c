@@ -289,7 +289,6 @@ void processMessage(int clientId, struct MyPack *msg) {
     if (n > 255) {
       n = 255;
     }
-    int nameChanges = strncmp(me->recvFilename, msg->buf+12, n);
     memcpy(me->recvFilename, msg->buf+12, n);
     me->recvFilename[n] = '\0';
     getSaferName(me->recvFilename);
@@ -302,9 +301,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       me->saveFileId = fileId;
     }
     else {
-      if (nameChanges) {
-        printf("Downloading file : %s\n\n", me->recvFilename);
-      }
+      printf("Downloading file : %s\n\n", me->recvFilename);
     }
     me->fileToRecv = fopen(myitoa(me->recvFileId), "wb");
   }
