@@ -15,6 +15,7 @@
 #define CANCEL ('C'<<8|'A')
 
 extern int isServer;
+extern int maxi;
 
 enum SendState {
   SendState_STARTING, SendState_SENDING, SendState_CHECKING, SendState_RESEND, SendState_CANCEL

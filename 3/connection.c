@@ -14,7 +14,10 @@ int userId = 0;
 
 struct MyHash users;
 
-char dupstr(char *str) {
+// all connected clients
+int maxi = 1;
+
+char *dupstr(char *str) {
   size_t n = strlen(str);
   char *ns = malloc(n+1);
   memcpy(ns, str, n+1);
@@ -204,29 +207,60 @@ void trySendToClientAgain(int clientId) {
   }
 }
 
+void sendToPeers(int clientId, struct client_info *me) {
+  int userId = me->userId, i;
+  for (i = 1; i <= maxi; i++) {
+    if (!Clients[i].closed && i != clientId && Clients[i].userId == userId) {
+      // same user
+      struct client_info *him = &Clients[i];
+      if (him->sendQueue.size > 0) {
+        /// check if sending the same file
+        struct QueueItem *qi = queueFirst(&him->sendQueue);
+        if (qi->fileId == me->saveFileId) {
+          // sending the uploading file
+          queuePop(&him->sendQueue);
+          free(qi->filename);
+          free(qi);
+          him->isSending = SendState_CANCEL;
+        }
+      }
+      struct QueueItem *qi = malloc(sizeof *qi);
+      qi->fileId = me->saveFileId;
+      qi->filename = dupstr(me->recvFilename);
+      queuePush(&him->sendQueue, qi);
+      ClientFd[i].events |= POLLWRNORM;
+    }
+  }
+}
+
 void processMessage(int clientId, struct MyPack *msg) {
   struct client_info *me = &Clients[clientId];
   int y = getPacketType(msg);
   if (y == CHECK) {
     if (me->fileToRecv == NULL) return ;
-    if (isServer)
-      printf("Client %d (%s) uploaded %s\n", clientId,  me->name , me->recvFilename);
-    else {
-      printf("\x1B[A\x1B[GProgress : [");
-      int i;
-      for (i = 0; i < 32; i++) putchar('#');
-      printf("]\n");
-      printf("Download %s complete!\n", me->recvFilename);
-    }
     ClientFd[clientId].events |= POLLWRNORM;
     int ok = 1;
     if (ok) {
+      if (isServer) {
+        printf("Client %d (%s) uploaded %s\n", clientId,  me->name , me->recvFilename);
+        sendToPeers(clientId, me);
+      }
+      else {
+        printf("\x1B[A\x1B[GProgress : [");
+        int i;
+        for (i = 0; i < 32; i++) putchar('#');
+        printf("]\n");
+        printf("Download %s complete!\n", me->recvFilename);
+      }
       me->isRecving = RecvState_OK;
       fclose(me->fileToRecv);
       me->fileToRecv = NULL;
       renameReceived(me);
     }
     else {
+      if (isServer) {
+        printf("Client %d's file '%s' checksum error\n", clientId, me->recvFilename);
+      }
       me->isRecving = RecvState_ERROR;
       deleteReceived(me);
     }
@@ -255,6 +289,7 @@ void processMessage(int clientId, struct MyPack *msg) {
     if (n > 255) {
       n = 255;
     }
+    int nameChanges = strncmp(me->recvFilename, msg->buf+12, n);
     memcpy(me->recvFilename, msg->buf+12, n);
     me->recvFilename[n] = '\0';
     getSaferName(me->recvFilename);
@@ -267,7 +302,9 @@ void processMessage(int clientId, struct MyPack *msg) {
       me->saveFileId = fileId;
     }
     else {
-      printf("Downloading file : %s\n\n", me->recvFilename);
+      if (nameChanges) {
+        printf("Downloading file : %s\n\n", me->recvFilename);
+      }
     }
     me->fileToRecv = fopen(myitoa(me->recvFileId), "wb");
   }
@@ -297,6 +334,7 @@ void processMessage(int clientId, struct MyPack *msg) {
     }
   }
   else if (y == OK) {
+    if (me->sendQueue.size == 0) return;
     if (me->isSending == SendState_CHECKING) {
       struct QueueItem *qi = queueFirst(&me->sendQueue);
       int i;
@@ -321,12 +359,16 @@ void processMessage(int clientId, struct MyPack *msg) {
     }
   }
   else if (y == ERROR) {
+    if (me->sendQueue.size == 0) return;
     if (me->isSending == SendState_CHECKING) {
       struct QueueItem *qi = queueFirst(&me->sendQueue);
+      if (isServer) {
+        printf("Error sending '%s' to client %d\n", qi->filename, clientId);
+      }
       fclose(me->fileToSend);
       me->fileToSend = NULL;
       me->isSending = SendState_RESEND;
-      ClientFd[0].events |= POLLWRNORM;
+      ClientFd[clientId].events |= POLLWRNORM;
     }
   }
   else if (y == CANCEL) {

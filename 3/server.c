@@ -30,9 +30,6 @@ int open_max; // maximum file descriptor id
 #define ERROR_HEAD  SERVER_HEAD "ERROR: "
 #define SUCCESS_HEAD  SERVER_HEAD "SUCCESS: "
 
-// all connected clients
-int maxi = 1;
-
 void initServer(char *portStr) {
   union good_sockaddr servaddr;
   sockfd = socket(AF_INET, SOCK_STREAM, 0);
