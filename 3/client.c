@@ -141,15 +141,15 @@ void readUser() {
       }
       puts("Client wakes up\n");
     }
-    else if (strcmp(d, "/cancel") == 0) {
-      if (Clients[0].sendQueue.size == 0) {
-        printf("No upload tasks to cancel\n");
-        return ;
-      }
-      queuePop(&Clients[0].sendQueue);
-      Clients[0].isSending = SendState_CANCEL;
-      ClientFd[0].events |= POLLWRNORM;
-    }
+    //else if (strcmp(d, "/cancel") == 0) {
+    //  if (Clients[0].sendQueue.size == 0) {
+    //    printf("No upload tasks to cancel\n");
+    //    return ;
+    //  }
+    //  queuePop(&Clients[0].sendQueue);
+    //  Clients[0].isSending = SendState_CANCEL;
+    //  ClientFd[0].events |= POLLWRNORM;
+    //}
   }
 }
 

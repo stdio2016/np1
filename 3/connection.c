@@ -311,7 +311,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       int fileId = getFileId(me->name, me->recvFilename);
       printf("Client %d uploads '%s' (file id=%d)\n", clientId, me->recvFilename, fileId);
       me->saveFileId = fileId;
-      cancelUser(clientId, me);
+      //cancelUser(clientId, me);
     }
     else {
       printf("Downloading file : %s\n\n", me->recvFilename);
