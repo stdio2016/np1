@@ -10,3 +10,4 @@ MyHash.o: MyHash.c MyHash.h
 clean:
 	@rm -f client server
 	@rm -f *.o
+	@rm -f *.tmp *.dat

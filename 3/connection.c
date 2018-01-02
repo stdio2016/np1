@@ -202,15 +202,15 @@ void trySendToClientAgain(int clientId) {
     if (Clients[clientId].send.finished == all) { // completed
       Clients[clientId].send.finished = 0;
       Clients[clientId].send.size = 0;
-      ClientFd[clientId].events &= ~POLLWRNORM;
+      //ClientFd[clientId].events &= ~POLLWRNORM;
     }
   }
 }
 
-void sendToPeers(int clientId, struct client_info *me) {
+void cancelUser(int clientId, struct client_info *me) {
   int userId = me->userId, i;
   for (i = 1; i <= maxi; i++) {
-    if (!Clients[i].closed && i != clientId && Clients[i].userId == userId) {
+    if (!Clients[i].closed && Clients[i].userId == userId) {
       // same user
       struct client_info *him = &Clients[i];
       if (him->sendQueue.size > 0) {
@@ -222,8 +222,20 @@ void sendToPeers(int clientId, struct client_info *me) {
           free(qi->filename);
           free(qi);
           him->isSending = SendState_CANCEL;
+          ClientFd[i].events |= POLLWRNORM;
+          printf("cancelled sending to client %d\n", i);
         }
       }
+    }
+  }
+}
+
+void sendToPeers(int clientId, struct client_info *me) {
+  int userId = me->userId, i;
+  for (i = 1; i <= maxi; i++) {
+    if (!Clients[i].closed && i != clientId && Clients[i].userId == userId) {
+      // same user
+      struct client_info *him = &Clients[i];
       struct QueueItem *qi = malloc(sizeof *qi);
       qi->fileId = me->saveFileId;
       qi->filename = dupstr(me->recvFilename);
@@ -299,6 +311,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       int fileId = getFileId(me->name, me->recvFilename);
       printf("Client %d uploads '%s' (file id=%d)\n", clientId, me->recvFilename, fileId);
       me->saveFileId = fileId;
+      cancelUser(clientId, me);
     }
     else {
       printf("Downloading file : %s\n\n", me->recvFilename);
@@ -373,7 +386,7 @@ void processMessage(int clientId, struct MyPack *msg) {
       printf("Client %d cancelled transmittion\n", clientId);
     }
     else {
-      printf("Server cancelled transmittion (Maybe someone is uploading the same file)\n");
+      printf("Download cancelled because someone is uploading the same file\n\n");
     }
     if (me->isRecving != RecvState_NONE) {
       deleteReceived(me);
