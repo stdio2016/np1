@@ -1,0 +1,125 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset='utf8'>
+<title>奇怪的網站</title>
+<style>
+#lblChat {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.username, .success {
+  color:green;
+}
+.error {
+  color:red;
+}
+.message {
+  color: #a08000;
+}
+</style>
+<script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/2.2.0/socket.io.js"></script>
+</head>
+<body>
+<h1>聊天室</h1>
+<pre id=lblChat></pre>
+<form id=cmdLine onsubmit="return false">
+<input name=cmd style="width:100%;">
+<button type=submit>OK</button>
+</form>
+<script>
+var socket = io('/chat');
+function send(){
+  var s = cmdLine.cmd.value;
+  var i = 0;
+  while (s[i] == ' ') i++;
+  s = s.substring(i);
+  if (s.length === 0) return;
+  i = s.indexOf(' ');
+  var op = s, args = "";
+  if (i !== -1) {
+    op = s.substring(0, i);
+    args = s.substring(i+1);
+  }
+  socket.emit('msg', {op: op, args: args});
+  cmdLine.cmd.value = "";
+}
+cmdLine.addEventListener('submit', send);
+function createSpan(txt, cls){
+  var e = document.createElement('span');
+  e.className = cls;
+  e.textContent = txt;
+  return e;
+}
+socket.on('hello', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan("Hello, ",""));
+  p.appendChild(createSpan(msg.name,"username"));
+  p.appendChild(createSpan("! From: "+msg.ip+"/"+msg.port,""));
+  lblChat.appendChild(p);
+});
+socket.on('join', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan("Someone is coming!",""));
+  lblChat.appendChild(p);
+});
+socket.on('leave', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan(msg.name,"username"));
+  p.appendChild(createSpan(" is offline.",""));
+  lblChat.appendChild(p);
+});
+socket.on('yell', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan(msg.name,"username"));
+  p.appendChild(createSpan(" yell ",""));
+  p.appendChild(createSpan(msg.msg,"message"));
+  lblChat.appendChild(p);
+});
+socket.on('who', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan(msg.name,"username"));
+  p.appendChild(createSpan(" "+msg.ip+"/"+msg.port,""));
+  if (msg.me)
+    p.appendChild(createSpan("->me",""));
+  lblChat.appendChild(p);
+});
+socket.on('err', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan("ERROR","error"));
+  p.appendChild(createSpan(": ",""));
+  p.appendChild(createSpan(msg.what,""));
+  lblChat.appendChild(p);
+});
+socket.on('success', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan("SUCCESS","success"));
+  p.appendChild(createSpan(": ",""));
+  p.appendChild(createSpan(msg.what,""));
+  lblChat.appendChild(p);
+});
+socket.on('name_me', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan("You're now known as ",""));
+  p.appendChild(createSpan(msg.now,"username"));
+  lblChat.appendChild(p);
+});
+socket.on('name_other', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan(msg.old,"username"));
+  p.appendChild(createSpan(" is now known as ",""));
+  p.appendChild(createSpan(msg.now,"username"));
+  lblChat.appendChild(p);
+});
+socket.on('tell', function(msg, cb) {
+  var p = document.createElement('div');
+  p.appendChild(createSpan(msg.name,"username"));
+  p.appendChild(createSpan(" tell you ",""));
+  p.appendChild(createSpan(msg.msg,"message"));
+  lblChat.appendChild(p);
+});
+</script>
+</body>
+</html>
