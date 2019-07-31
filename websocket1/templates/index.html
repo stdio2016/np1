@@ -30,8 +30,11 @@
 <button type=submit>OK</button>
 </form>
 <script>
+var path = location.pathname;
+var i = path.lastIndexOf('/');
+path = path.substring(0, i);
 var socket = io('/chat', {
-  path: '/chat/socket.io'
+  path: path + '/socket.io'
 });
 function send(){
   var s = cmdLine.cmd.value;
