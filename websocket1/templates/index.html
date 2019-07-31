@@ -3,7 +3,7 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta charset='utf8'>
-<title>奇怪的網站</title>
+<title>聊天室測試</title>
 <style>
 #lblChat {
   white-space: pre-wrap;
@@ -26,11 +26,13 @@
 <h1>聊天室</h1>
 <pre id=lblChat></pre>
 <form id=cmdLine onsubmit="return false">
-<input name=cmd style="width:100%;">
+<input name=cmd style="width:100%;" autocomplete=off>
 <button type=submit>OK</button>
 </form>
 <script>
-var socket = io('/chat');
+var socket = io('/chat', {
+  path: '/chat/socket.io'
+});
 function send(){
   var s = cmdLine.cmd.value;
   var i = 0;
