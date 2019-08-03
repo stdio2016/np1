@@ -18,16 +18,24 @@ def js_files(filename):
 
 @socketio.on('connect', namespace='/chat')
 def hello():
+    ip = request.remote_addr
+    if 'x-forwarded-for' in request.headers:
+        ip = request.headers['x-forwarded-for']
+
+    port = request.environ['REMOTE_PORT']
+    if 'x-forwarded-port' in request.headers:
+        port = request.headers['x-forwarded-port']
+
     clients.append({
       'sid': request.sid,
       'name': 'anonymous',
-      'ip': request.remote_addr,
-      'port': request.environ['REMOTE_PORT']
+      'ip': ip,
+      'port': port
     })
     emit('hello', {
       'name': 'anonymous',
-      'ip': request.remote_addr,
-      'port': request.environ['REMOTE_PORT']},
+      'ip': ip,
+      'port': port},
       broadcast=False)
     emit('join', None, broadcast=True, include_self=False)
 
@@ -139,4 +147,4 @@ def message(msg):
             emit('err', {'what': 'Error command. The program supports name, who, yell, and tell command'}, room=me['sid'])
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False)
+    socketio.run(app, host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False)
